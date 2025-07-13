@@ -170,7 +170,9 @@ impl TTSKoko {
         initial_silence: Option<usize>,
     ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
         // Split text into appropriate chunks
-        let chunks = self.split_text_into_chunks(txt, 500); // Using 500 to leave 12 tokens of margin
+        // Account for initial silence padding and add extra margin for safety
+        let max_chunk_tokens = 500 - initial_silence.unwrap_or(0) - 20; // Extra 20 token safety margin
+        let chunks = self.split_text_into_chunks(txt, max_chunk_tokens.max(100)); // Minimum 100 tokens
         let mut final_audio = Vec::new();
 
         for chunk in chunks {
