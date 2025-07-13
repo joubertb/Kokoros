@@ -24,6 +24,9 @@ COPY --from=builderrs /app/checkpoints ./checkpoints
 
 RUN chmod +x ./target/release/koko && apt-get update -qq && apt-get install -qq -y pkg-config libssl-dev 
 
-EXPOSE 3000
+# Create tmp directory for kokoros temporary files
+RUN mkdir -p tmp
 
-ENTRYPOINT [ "./target/release/koko" ]
+EXPOSE 3025
+
+ENTRYPOINT [ "./target/release/koko", "openai", "--port", "3025" ]
