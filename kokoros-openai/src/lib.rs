@@ -9,6 +9,7 @@ use kokoros::{
     utils::mp3::pcm_to_mp3,
     utils::wav::{write_audio_chunk, WavHeader},
 };
+use log::debug;
 use serde::Deserialize;
 use tower_http::cors::CorsLayer;
 
@@ -62,7 +63,7 @@ struct SpeechRequest {
 }
 
 pub async fn create_server(tts: TTSKoko) -> Router {
-    println!("create_server()");
+    debug!("create_server()");
 
     Router::new()
         .route("/", get(handle_home))

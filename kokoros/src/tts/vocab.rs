@@ -1,4 +1,5 @@
 use lazy_static::lazy_static;
+use log::debug;
 use std::collections::HashMap;
 
 pub fn get_vocab() -> std::collections::HashMap<char, usize> {
@@ -28,7 +29,7 @@ pub fn print_sorted_reverse_vocab() {
     sorted_keys.sort();
 
     for key in sorted_keys {
-        eprintln!("{}: {}", key, REVERSE_VOCAB[key]);
+        debug!("{}: {}", key, REVERSE_VOCAB[key]);
     }
 }
 

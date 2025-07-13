@@ -3,6 +3,7 @@ use kokoros::{
     tts::koko::{TTSKoko, TTSOpts},
     utils::wav::{write_audio_chunk, WavHeader},
 };
+use log::{info, error};
 use std::net::{IpAddr, SocketAddr};
 use std::{
     fs::{self},
@@ -134,6 +135,9 @@ struct Cli {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize logging - respects RUST_LOG environment variable
+    env_logger::init();
+    
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         let Cli {
@@ -185,17 +189,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     speed,
                     initial_silence,
                 })?;
-                println!("Time taken: {:?}", s.elapsed());
+                info!("Time taken: {:?}", s.elapsed());
                 let words_per_second =
                     text.split_whitespace().count() as f32 / s.elapsed().as_secs_f32();
-                println!("Words per second: {:.2}", words_per_second);
+                info!("Words per second: {:.2}", words_per_second);
             }
 
             Mode::OpenAI { ip, port } => {
                 let app = kokoros_openai::create_server(tts).await;
                 let addr = SocketAddr::from((ip, port));
                 let binding = tokio::net::TcpListener::bind(&addr).await?;
-                println!("Starting OpenAI-compatible HTTP server on {addr}");
+                info!("Starting OpenAI-compatible HTTP server on {addr}");
                 kokoros_openai::serve(binding, app.into_make_service()).await?;
             }
 
@@ -207,7 +211,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Use std::io::stdout() for sync writing
                 let mut stdout = std::io::stdout();
 
-                eprintln!(
+                info!(
                     "Entering streaming mode. Type text and press Enter. Use Ctrl+D to exit."
                 );
 
@@ -228,9 +232,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Write the raw audio samples directly
                             write_audio_chunk(&mut stdout, &raw_audio)?;
                             stdout.flush()?;
-                            eprintln!("Audio written to stdout. Ready for another line of text.");
+                            info!("Audio written to stdout. Ready for another line of text.");
                         }
-                        Err(e) => eprintln!("Error processing line: {}", e),
+                        Err(e) => error!("Error processing line: {}", e),
                     }
                 }
             }

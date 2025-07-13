@@ -1,4 +1,5 @@
 use indicatif::{ProgressBar, ProgressStyle};
+use log::info;
 use serde_json::Value;
 use std::{io::Read, path::Path};
 use tokio::{fs::File, io::AsyncWriteExt};
@@ -16,7 +17,7 @@ pub async fn download_file_from_url(
     if resp.status().is_success() {
         let total_size = resp.content_length().unwrap_or(0);
 
-        eprintln!("Downloading {} - total size: {}", path, total_size);
+        info!("Downloading {} - total size: {}", path, total_size);
 
         let pb = ProgressBar::new(total_size);
         pb.set_style(ProgressStyle::default_bar()

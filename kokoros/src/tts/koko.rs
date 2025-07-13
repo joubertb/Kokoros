@@ -1,6 +1,7 @@
 use crate::onn::ort_koko::{self};
 use crate::tts::tokenize::tokenize;
 use crate::utils;
+use log::{debug, info, error};
 use ndarray::Array3;
 use ndarray_npy::NpzReader;
 use std::collections::HashMap;
@@ -180,7 +181,7 @@ impl TTSKoko {
             let phonemes = text_to_phonemes(&chunk, lan, None, true, false)
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
                 .join("");
-            eprintln!("phonemes: {}", phonemes);
+            debug!("phonemes: {}", phonemes);
             let mut tokens = tokenize(&phonemes);
 
             for _ in 0..initial_silence.unwrap_or(0) {
@@ -210,8 +211,8 @@ impl TTSKoko {
                     final_audio.extend_from_slice(&chunk_audio);
                 }
                 Err(e) => {
-                    eprintln!("Error processing chunk: {:?}", e);
-                    eprintln!("Chunk text was: {:?}", chunk);
+                    error!("Error processing chunk: {:?}", e);
+                    error!("Chunk text was: {:?}", chunk);
                     return Err(Box::new(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         format!("Chunk processing failed: {:?}", e),
@@ -266,7 +267,7 @@ impl TTSKoko {
             }
             writer.finalize()?;
         }
-        eprintln!("Audio saved to {}", save_path);
+        info!("Audio saved to {}", save_path);
         Ok(())
     }
 
@@ -283,7 +284,7 @@ impl TTSKoko {
                 Err(format!("can not found from styles_map: {}", style_name).into())
             }
         } else {
-            eprintln!("parsing style mix");
+            debug!("parsing style mix");
             let styles: Vec<&str> = style_name.split('+').collect();
 
             let mut style_names = Vec::new();
@@ -297,7 +298,7 @@ impl TTSKoko {
                     }
                 }
             }
-            eprintln!("styles: {:?}, portions: {:?}", style_names, style_portions);
+            debug!("styles: {:?}, portions: {:?}", style_names, style_portions);
 
             let mut blended_style = vec![vec![0.0; 256]; 1];
 
@@ -338,7 +339,7 @@ impl TTSKoko {
             voices
         };
 
-        eprintln!("voice styles loaded: {:?}", sorted_voices);
+        info!("voice styles loaded: {:?}", sorted_voices);
         map
     }
 }
