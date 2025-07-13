@@ -1,4 +1,33 @@
-use mp3lame_encoder::{Builder, FlushNoGap, Id3Tag, MonoPcm};
+use mp3lame_encoder::{Bitrate, Builder, FlushNoGap, Id3Tag, MonoPcm};
+use log::warn;
+use std::env;
+
+fn get_configured_bitrate() -> Bitrate {
+    let bitrate_str = env::var("MP3_BITRATE").unwrap_or_else(|_| "192".to_string());
+    
+    match bitrate_str.as_str() {
+        "8" => Bitrate::Kbps8,
+        "16" => Bitrate::Kbps16,
+        "24" => Bitrate::Kbps24,
+        "32" => Bitrate::Kbps32,
+        "40" => Bitrate::Kbps40,
+        "48" => Bitrate::Kbps48,
+        "64" => Bitrate::Kbps64,
+        "80" => Bitrate::Kbps80,
+        "96" => Bitrate::Kbps96,
+        "112" => Bitrate::Kbps112,
+        "128" => Bitrate::Kbps128,
+        "160" => Bitrate::Kbps160,
+        "192" => Bitrate::Kbps192,
+        "224" => Bitrate::Kbps224,
+        "256" => Bitrate::Kbps256,
+        "320" => Bitrate::Kbps320,
+        _ => {
+            warn!("Invalid MP3_BITRATE '{}', defaulting to 192kbps", bitrate_str);
+            Bitrate::Kbps192
+        }
+    }
+}
 
 pub fn pcm_to_mp3(pcm_data: &[f32], sample_rate: u32) -> Result<Vec<u8>, std::io::Error> {
     let mut mp3_encoder = Builder::new().ok_or(std::io::Error::new(
@@ -19,7 +48,7 @@ pub fn pcm_to_mp3(pcm_data: &[f32], sample_rate: u32) -> Result<Vec<u8>, std::io
         )
     })?;
     mp3_encoder
-        .set_brate(mp3lame_encoder::Bitrate::Kbps192)
+        .set_brate(get_configured_bitrate())
         .map_err(|e| {
             std::io::Error::new(
                 std::io::ErrorKind::Other,
