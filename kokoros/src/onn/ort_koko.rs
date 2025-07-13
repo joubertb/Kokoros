@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use log::debug;
 use ndarray::{ArrayBase, IxDyn, OwnedRepr};
 use ort::{
     session::{Session, SessionInputValue, SessionInputs, SessionOutputs},
@@ -41,7 +42,7 @@ impl OrtKoko {
         let tokens_value: SessionInputValue = SessionInputValue::Owned(Value::from(tokens));
 
         let shape_style = [styles.len(), styles[0].len()];
-        eprintln!("shape_style: {:?}", shape_style);
+        debug!("shape_style: {:?}", shape_style);
         let style_flat: Vec<f32> = styles.into_iter().flatten().collect();
         let style = Tensor::from_array((shape_style, style_flat))?;
         let style_value: SessionInputValue = SessionInputValue::Owned(Value::from(style));

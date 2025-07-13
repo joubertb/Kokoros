@@ -9,3 +9,4 @@ kokoros = { path = "../kokoros" }
 axum = { version = "0.8.4", features = ["http2"] }
 serde = { version = "1.0.219", features = ["derive"] }
 tower-http = { version = "0.6.6", features = ["cors"] }
+log = "0.4"

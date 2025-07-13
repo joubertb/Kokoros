@@ -5,6 +5,7 @@ use ort::execution_providers::coreml::CoreMLExecutionProvider;
 use ort::execution_providers::cpu::CPUExecutionProvider;
 use ort::session::builder::SessionBuilder;
 use ort::session::Session;
+use log::{debug, info};
 
 pub trait OrtBase {
     fn load_model(&mut self, model_path: String) -> Result<(), String> {
@@ -36,25 +37,25 @@ pub trait OrtBase {
 
     fn print_info(&self) {
         if let Some(session) = self.sess() {
-            eprintln!("Input names:");
+            debug!("Input names:");
             for input in &session.inputs {
-                eprintln!("  - {}", input.name);
+                debug!("  - {}", input.name);
             }
-            eprintln!("Output names:");
+            debug!("Output names:");
             for output in &session.outputs {
-                eprintln!("  - {}", output.name);
+                debug!("  - {}", output.name);
             }
 
             #[cfg(feature = "cuda")]
-            eprintln!("Configured with: CUDA execution provider");
+            info!("Configured with: CUDA execution provider");
 
             #[cfg(feature = "coreml")]
-            eprintln!("Configured with: CoreML execution provider");
+            info!("Configured with: CoreML execution provider");
 
             #[cfg(all(not(feature = "cuda"), not(feature = "coreml")))]
-            eprintln!("Configured with: CPU execution provider");
+            info!("Configured with: CPU execution provider");
         } else {
-            eprintln!("Session is not initialized.");
+            debug!("Session is not initialized.");
         }
     }
 
