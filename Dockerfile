@@ -6,8 +6,6 @@ RUN apt-get update -qq && apt-get install -qq -y wget pkg-config libssl-dev clan
 WORKDIR /app
 
 COPY . .
-COPY Cargo.toml .
-COPY Cargo.lock .
 
 RUN chmod +x ./download_all.sh && ./download_all.sh
 
