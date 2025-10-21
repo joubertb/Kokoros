@@ -1,16 +1,18 @@
 use std::error::Error;
 use std::io::{self};
+use std::sync::Arc;
 
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::{extract::State, routing::get, routing::post, Json, Router};
+use axum::{Json, Router, extract::State, routing::get, routing::post};
 use kokoros::{
     tts::koko::{InitConfig as TTSKokoInitConfig, TTSKoko},
     utils::mp3::pcm_to_mp3,
-    utils::wav::{write_audio_chunk, WavHeader},
+    utils::wav::{WavHeader, write_audio_chunk},
 };
-use log::debug;
+use log::{debug, info};
 use serde::Deserialize;
+use tokio::sync::Semaphore;
 use tower_http::cors::CorsLayer;
 
 #[derive(Deserialize, Default, Debug)]
@@ -62,14 +64,45 @@ struct SpeechRequest {
     initial_silence: Option<usize>,
 }
 
+/// Shared server state with concurrency limiting
+#[derive(Clone)]
+struct ServerState {
+    tts: TTSKoko,
+    /// Semaphore to limit concurrent TTS requests
+    /// Default: 4 concurrent requests max to prevent ONNX Runtime overload
+    concurrency_limit: Arc<Semaphore>,
+}
+
+impl ServerState {
+    fn new(tts: TTSKoko, max_concurrent_requests: usize) -> Self {
+        info!(
+            "Initializing TTS server with max {} concurrent requests",
+            max_concurrent_requests
+        );
+        Self {
+            tts,
+            concurrency_limit: Arc::new(Semaphore::new(max_concurrent_requests)),
+        }
+    }
+}
+
 pub async fn create_server(tts: TTSKoko) -> Router {
     debug!("create_server()");
+
+    // Default to 4 concurrent requests to prevent overwhelming ONNX Runtime
+    // This can be made configurable via environment variable if needed
+    let max_concurrent = std::env::var("KOKOROS_MAX_CONCURRENT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4);
+
+    let state = ServerState::new(tts, max_concurrent);
 
     Router::new()
         .route("/", get(handle_home))
         .route("/v1/audio/speech", post(handle_tts))
         .layer(CorsLayer::permissive())
-        .with_state(tts)
+        .with_state(state)
 }
 
 pub use axum::serve;
@@ -105,7 +138,7 @@ async fn handle_home() -> &'static str {
 }
 
 async fn handle_tts(
-    State(tts): State<TTSKoko>,
+    State(state): State<ServerState>,
     Json(SpeechRequest {
         model: _,
         input,
@@ -115,7 +148,24 @@ async fn handle_tts(
         initial_silence,
     }): Json<SpeechRequest>,
 ) -> Result<Response, SpeechError> {
-    let raw_audio = tts
+    // Acquire semaphore permit to limit concurrency
+    // This will wait if max concurrent requests are already processing
+    let _permit = state.concurrency_limit.acquire().await.map_err(|e| {
+        SpeechError::Koko(Box::new(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Failed to acquire concurrency permit: {}", e),
+        )))
+    })?;
+
+    debug!(
+        "Processing TTS request for voice: {}, speed: {}, text length: {}",
+        voice,
+        speed,
+        input.len()
+    );
+
+    let raw_audio = state
+        .tts
         .tts_raw_audio(&input, "en-us", &voice, speed, initial_silence)
         .map_err(SpeechError::Koko)?;
 
