@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::io::{self};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use axum::http::{StatusCode, header};
@@ -64,39 +65,79 @@ struct SpeechRequest {
     initial_silence: Option<usize>,
 }
 
-/// Shared server state with concurrency limiting
+/// Session pool for parallel ONNX Runtime processing
+#[derive(Clone)]
+struct SessionPool {
+    sessions: Arc<Vec<TTSKoko>>,
+    counter: Arc<AtomicUsize>,
+}
+
+impl SessionPool {
+    fn new(sessions: Vec<TTSKoko>) -> Self {
+        let pool_size = sessions.len();
+        info!("Created session pool with {} ONNX Runtime sessions", pool_size);
+        Self {
+            sessions: Arc::new(sessions),
+            counter: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Get next session using round-robin selection
+    fn get_session(&self) -> &TTSKoko {
+        let index = self.counter.fetch_add(1, Ordering::Relaxed) % self.sessions.len();
+        &self.sessions[index]
+    }
+
+    fn pool_size(&self) -> usize {
+        self.sessions.len()
+    }
+}
+
+/// Shared server state with session pooling and concurrency limiting
 #[derive(Clone)]
 struct ServerState {
-    tts: TTSKoko,
+    session_pool: SessionPool,
     /// Semaphore to limit concurrent TTS requests
-    /// Default: 4 concurrent requests max to prevent ONNX Runtime overload
+    /// Should match or exceed session pool size for true parallelism
     concurrency_limit: Arc<Semaphore>,
 }
 
 impl ServerState {
-    fn new(tts: TTSKoko, max_concurrent_requests: usize) -> Self {
+    fn new(session_pool: SessionPool, max_concurrent_requests: usize) -> Self {
+        let pool_size = session_pool.pool_size();
+
         info!(
-            "Initializing TTS server with max {} concurrent requests",
-            max_concurrent_requests
+            "Initializing TTS server with {} ONNX sessions and max {} concurrent requests",
+            pool_size, max_concurrent_requests
         );
+
+        if max_concurrent_requests < pool_size {
+            info!(
+                "WARNING: max_concurrent ({}) < pool_size ({}). Consider increasing KOKOROS_MAX_CONCURRENT to {}",
+                max_concurrent_requests, pool_size, pool_size
+            );
+        }
+
         Self {
-            tts,
+            session_pool,
             concurrency_limit: Arc::new(Semaphore::new(max_concurrent_requests)),
         }
     }
 }
 
-pub async fn create_server(tts: TTSKoko) -> Router {
+pub async fn create_server(sessions: Vec<TTSKoko>) -> Router {
     debug!("create_server()");
 
-    // Default to 4 concurrent requests to prevent overwhelming ONNX Runtime
-    // This can be made configurable via environment variable if needed
+    let pool_size = sessions.len();
+
+    // Default max_concurrent to pool_size for true parallelism
     let max_concurrent = std::env::var("KOKOROS_MAX_CONCURRENT")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(4);
+        .unwrap_or(pool_size);
 
-    let state = ServerState::new(tts, max_concurrent);
+    let session_pool = SessionPool::new(sessions);
+    let state = ServerState::new(session_pool, max_concurrent);
 
     Router::new()
         .route("/", get(handle_home))
@@ -164,8 +205,10 @@ async fn handle_tts(
         input.len()
     );
 
-    let raw_audio = state
-        .tts
+    // Get next available session from pool (round-robin)
+    let session = state.session_pool.get_session();
+
+    let raw_audio = session
         .tts_raw_audio(&input, "en-us", &voice, speed, initial_silence)
         .map_err(SpeechError::Koko)?;
 

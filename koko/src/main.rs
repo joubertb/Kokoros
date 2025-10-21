@@ -196,7 +196,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             Mode::OpenAI { ip, port } => {
-                let app = kokoros_openai::create_server(tts).await;
+                // Create session pool - default 2 sessions for parallel processing
+                let pool_size: usize = std::env::var("KOKOROS_SESSION_POOL_SIZE")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(2);
+
+                info!("Creating session pool with {} ONNX Runtime sessions", pool_size);
+                info!("This will take approximately {} seconds...", pool_size * 60);
+
+                // Create pool of TTS sessions
+                let mut sessions = vec![tts]; // First session already created
+
+                for i in 1..pool_size {
+                    info!("Initializing ONNX session {}/{}...", i + 1, pool_size);
+                    let session = TTSKoko::new(&model_path, &data_path).await;
+                    sessions.push(session);
+                }
+
+                info!("All {} ONNX sessions initialized successfully", pool_size);
+
+                let app = kokoros_openai::create_server(sessions).await;
                 let addr = SocketAddr::from((ip, port));
                 let binding = tokio::net::TcpListener::bind(&addr).await?;
                 info!("Starting OpenAI-compatible HTTP server on {addr}");
