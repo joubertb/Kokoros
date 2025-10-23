@@ -41,9 +41,8 @@ This directory contains the Kokoros text-to-speech (TTS) engine - a high-quality
 
 #### API Endpoints
 - **POST /v1/audio/speech**: Generate speech from text (OpenAI compatible)
-- **GET /voices**: List available voices and their characteristics
-- **GET /health**: Service health check endpoint
-- **POST /synthesize**: Direct TTS synthesis endpoint
+- **GET /health**: Service health check endpoint with detailed status information
+- **GET /**: Simple health check returning "OK"
 
 ### Core Processing Library (`koko/`)
 - **Audio Processing**: Core audio manipulation and encoding functions
@@ -128,6 +127,28 @@ This directory contains the Kokoros text-to-speech (TTS) engine - a high-quality
 - **Audio Data**: Raw audio bytes or streaming audio
 - **Metadata**: Audio duration, format, and quality information
 - **Error Handling**: Detailed error messages for processing failures
+
+### Health Check Endpoint
+
+The `/health` endpoint provides detailed service status information:
+
+**Response Format:**
+```json
+{
+  "status": "healthy",
+  "service": "kokoros-tts",
+  "model_loaded": true,
+  "sample_rate": 24000,
+  "supported_formats": ["wav", "mp3"]
+}
+```
+
+**Response Fields:**
+- `status`: Current service health status ("healthy" when operational)
+- `service`: Service identifier ("kokoros-tts")
+- `model_loaded`: Boolean indicating if TTS model is loaded and ready
+- `sample_rate`: Audio sample rate in Hz (typically 24000)
+- `supported_formats`: Array of supported audio output formats
 
 ## Voice Configuration
 

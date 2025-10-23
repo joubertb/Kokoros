@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::io::{self};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -12,7 +12,7 @@ use kokoros::{
     utils::wav::{WavHeader, write_audio_chunk},
 };
 use log::{debug, info};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tower_http::cors::CorsLayer;
 
@@ -75,7 +75,10 @@ struct SessionPool {
 impl SessionPool {
     fn new(sessions: Vec<TTSKoko>) -> Self {
         let pool_size = sessions.len();
-        info!("Created session pool with {} ONNX Runtime sessions", pool_size);
+        info!(
+            "Created session pool with {} ONNX Runtime sessions",
+            pool_size
+        );
         Self {
             sessions: Arc::new(sessions),
             counter: Arc::new(AtomicUsize::new(0)),
@@ -141,6 +144,7 @@ pub async fn create_server(sessions: Vec<TTSKoko>) -> Router {
 
     Router::new()
         .route("/", get(handle_home))
+        .route("/health", get(handle_health))
         .route("/v1/audio/speech", post(handle_tts))
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -176,6 +180,30 @@ impl IntoResponse for SpeechError {
 /// running.
 async fn handle_home() -> &'static str {
     "OK"
+}
+
+#[derive(Serialize)]
+struct HealthResponse {
+    status: String,
+    service: String,
+    model_loaded: bool,
+    sample_rate: u32,
+    supported_formats: Vec<String>,
+    pool_size: usize,
+}
+
+/// Returns detailed health information about the TTS service
+async fn handle_health(State(state): State<ServerState>) -> Json<HealthResponse> {
+    let config = TTSKokoInitConfig::default();
+
+    Json(HealthResponse {
+        status: "healthy".to_string(),
+        service: "kokoros-tts".to_string(),
+        model_loaded: true,
+        sample_rate: config.sample_rate,
+        supported_formats: vec!["wav".to_string(), "mp3".to_string()],
+        pool_size: state.session_pool.pool_size(),
+    })
 }
 
 async fn handle_tts(
