@@ -4,12 +4,13 @@ use lazy_static::lazy_static;
 use regex::Regex;
 
 lazy_static! {
-    static ref PHONEME_PATTERNS: Regex = Regex::new(r"(?<=[a-zɹː])(?=hˈʌndɹɪd)").unwrap();
-    static ref Z_PATTERN: Regex = Regex::new(r#" z(?=[;:,.!?¡¿—…"«»"" ]|$)"#).unwrap();
-    static ref NINETY_PATTERN: Regex = Regex::new(r"(?<=nˈaɪn)ti(?!ː)").unwrap();
+    static ref PHONEME_PATTERNS: Regex = Regex::new(r"([a-zɹː])(hˈʌndɹɪd)").unwrap();
+    static ref Z_PATTERN: Regex = Regex::new(r#" z([;:,.!?¡¿—…"«»"" ]|$)"#).unwrap();
+    static ref NINETY_PATTERN: Regex = Regex::new(r"(nˈaɪn)ti([^ː]|$)").unwrap();
 }
 
 // Placeholder for the EspeakBackend struct
+#[allow(dead_code)]
 struct EspeakBackend {
     language: String,
     preserve_punctuation: bool,
@@ -77,11 +78,11 @@ impl Phonemizer {
             .replace("ɬ", "l");
 
         // Apply regex patterns
-        ps = PHONEME_PATTERNS.replace_all(&ps, " ").to_string();
-        ps = Z_PATTERN.replace_all(&ps, "z").to_string();
+        ps = PHONEME_PATTERNS.replace_all(&ps, "$1 $2").to_string();
+        ps = Z_PATTERN.replace_all(&ps, " z$1").to_string();
 
         if self.lang == "a" {
-            ps = NINETY_PATTERN.replace_all(&ps, "di").to_string();
+            ps = NINETY_PATTERN.replace_all(&ps, "${1}di$2").to_string();
         }
 
         // Filter characters present in vocabulary

@@ -220,10 +220,10 @@ async fn handle_tts(
     // Acquire semaphore permit to limit concurrency
     // This will wait if max concurrent requests are already processing
     let _permit = state.concurrency_limit.acquire().await.map_err(|e| {
-        SpeechError::Koko(Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Failed to acquire concurrency permit: {}", e),
-        )))
+        SpeechError::Koko(Box::new(std::io::Error::other(format!(
+            "Failed to acquire concurrency permit: {}",
+            e
+        ))))
     })?;
 
     debug!(
@@ -255,16 +255,14 @@ async fn handle_tts(
         }
         AudioFormat::Mp3 => {
             let mp3_data =
-                pcm_to_mp3(&raw_audio, sample_rate).map_err(|e| SpeechError::Mp3Conversion(e))?;
+                pcm_to_mp3(&raw_audio, sample_rate).map_err(SpeechError::Mp3Conversion)?;
 
             ("audio/mpeg", mp3_data)
         }
     };
 
-    Ok(Response::builder()
+    Response::builder()
         .header(header::CONTENT_TYPE, content_type)
         .body(audio_data.into())
-        .map_err(|e| {
-            SpeechError::Mp3Conversion(std::io::Error::new(std::io::ErrorKind::Other, e))
-        })?)
+        .map_err(|e| SpeechError::Mp3Conversion(std::io::Error::other(e)))
 }

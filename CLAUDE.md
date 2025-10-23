@@ -139,7 +139,8 @@ The `/health` endpoint provides detailed service status information:
   "service": "kokoros-tts",
   "model_loaded": true,
   "sample_rate": 24000,
-  "supported_formats": ["wav", "mp3"]
+  "supported_formats": ["wav", "mp3"],
+  "pool_size": 4
 }
 ```
 
@@ -149,6 +150,7 @@ The `/health` endpoint provides detailed service status information:
 - `model_loaded`: Boolean indicating if TTS model is loaded and ready
 - `sample_rate`: Audio sample rate in Hz (typically 24000)
 - `supported_formats`: Array of supported audio output formats
+- `pool_size`: Number of ONNX Runtime sessions in the pool for parallel processing
 
 ## Voice Configuration
 

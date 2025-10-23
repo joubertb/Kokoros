@@ -1,9 +1,9 @@
 use clap::{Parser, Subcommand};
 use kokoros::{
     tts::koko::{TTSKoko, TTSOpts},
-    utils::wav::{write_audio_chunk, WavHeader},
+    utils::wav::{WavHeader, write_audio_chunk},
 };
-use log::{info, error};
+use log::{error, info};
 use std::net::{IpAddr, SocketAddr};
 use std::{
     fs::{self},
@@ -137,7 +137,7 @@ struct Cli {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging - respects RUST_LOG environment variable
     env_logger::init();
-    
+
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         let Cli {
@@ -202,7 +202,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(2);
 
-                info!("Creating session pool with {} ONNX Runtime sessions", pool_size);
+                info!(
+                    "Creating session pool with {} ONNX Runtime sessions",
+                    pool_size
+                );
                 info!("This will take approximately {} seconds...", pool_size * 60);
 
                 // Create pool of TTS sessions
@@ -231,9 +234,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Use std::io::stdout() for sync writing
                 let mut stdout = std::io::stdout();
 
-                info!(
-                    "Entering streaming mode. Type text and press Enter. Use Ctrl+D to exit."
-                );
+                info!("Entering streaming mode. Type text and press Enter. Use Ctrl+D to exit.");
 
                 // Write WAV header first
                 let header = WavHeader::new(1, 24000, 32);
@@ -247,7 +248,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     // Process the line and get audio data
-                    match tts.tts_raw_audio(&stripped_line, &lan, &style, speed, initial_silence) {
+                    match tts.tts_raw_audio(stripped_line, &lan, &style, speed, initial_silence) {
                         Ok(raw_audio) => {
                             // Write the raw audio samples directly
                             write_audio_chunk(&mut stdout, &raw_audio)?;

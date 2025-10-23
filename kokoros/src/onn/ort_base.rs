@@ -1,30 +1,30 @@
-#[cfg(feature = "cuda")]
-use ort::execution_providers::cuda::CUDAExecutionProvider;
+use log::{debug, info};
 #[cfg(feature = "coreml")]
 use ort::execution_providers::coreml::CoreMLExecutionProvider;
 use ort::execution_providers::cpu::CPUExecutionProvider;
-use ort::session::builder::SessionBuilder;
+#[cfg(feature = "cuda")]
+use ort::execution_providers::cuda::CUDAExecutionProvider;
 use ort::session::Session;
-use log::{debug, info};
+use ort::session::builder::SessionBuilder;
 
 pub trait OrtBase {
     fn load_model(&mut self, model_path: String) -> Result<(), String> {
         #[cfg(feature = "cuda")]
-        let providers = [CUDAExecutionProvider::default().build()];
+        let _providers = [CUDAExecutionProvider::default().build()];
 
         #[cfg(feature = "coreml")]
-        let providers = [
+        let _providers = [
             CoreMLExecutionProvider::default().build(),
-            CPUExecutionProvider::default().build()
+            CPUExecutionProvider::default().build(),
         ];
 
         #[cfg(all(not(feature = "cuda"), not(feature = "coreml")))]
-        let providers = [CPUExecutionProvider::default().build()];
+        let _providers = [CPUExecutionProvider::default().build()];
 
         match SessionBuilder::new() {
             Ok(builder) => {
                 let session = builder
-                    .with_execution_providers(providers)
+                    .with_execution_providers(_providers)
                     .map_err(|e| format!("Failed to build session: {}", e))?
                     .commit_from_file(model_path)
                     .map_err(|e| format!("Failed to commit from file: {}", e))?;

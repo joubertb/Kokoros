@@ -35,7 +35,6 @@ impl OrtKoko {
         styles: Vec<Vec<f32>>,
         speed: f32,
     ) -> Result<ArrayBase<OwnedRepr<f32>, IxDyn>, Box<dyn std::error::Error>> {
-
         let shape = [tokens.len(), tokens[0].len()];
         let tokens_flat: Vec<i64> = tokens.into_iter().flatten().collect();
         let tokens = Tensor::from_array((shape, tokens_flat))?;
@@ -64,9 +63,10 @@ impl OrtKoko {
                 .expect("Failed to extract tensor");
 
             // Convert Shape and &[f32] to ArrayBase<OwnedRepr<f32>, IxDyn>
-            let shape_vec: Vec<usize> = shape.into_iter().map(|&i| i as usize).collect();
+            let shape_vec: Vec<usize> = shape.iter().map(|&i| i as usize).collect();
             let data_vec: Vec<f32> = data.to_vec();
-            let output_array = ArrayBase::<OwnedRepr<f32>, IxDyn>::from_shape_vec(shape_vec, data_vec)?;
+            let output_array =
+                ArrayBase::<OwnedRepr<f32>, IxDyn>::from_shape_vec(shape_vec, data_vec)?;
 
             Ok(output_array)
         } else {

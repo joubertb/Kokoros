@@ -1,7 +1,7 @@
 use crate::onn::ort_koko::{self};
 use crate::tts::tokenize::tokenize;
 use crate::utils;
-use log::{debug, info, error};
+use log::{debug, error, info};
 use ndarray::Array3;
 use ndarray_npy::NpzReader;
 use std::collections::HashMap;
@@ -66,9 +66,9 @@ impl TTSKoko {
                 .expect("download voices data file failed.");
         }
 
-
         let model = Arc::new(Mutex::new(
-            ort_koko::OrtKoko::new(model_path.to_string()).expect("Failed to create Kokoro TTS model"),
+            ort_koko::OrtKoko::new(model_path.to_string())
+                .expect("Failed to create Kokoro TTS model"),
         ));
         // TODO: if(not streaming) { model.print_info(); }
         // model.print_info();
@@ -88,7 +88,7 @@ impl TTSKoko {
 
         // First split by sentences - using common sentence ending punctuation
         let sentences: Vec<&str> = text
-            .split(|c| c == '.' || c == '?' || c == '!' || c == ';')
+            .split(['.', '?', '!', ';'])
             .filter(|s| !s.trim().is_empty())
             .collect();
 
@@ -213,10 +213,10 @@ impl TTSKoko {
                 Err(e) => {
                     error!("Error processing chunk: {:?}", e);
                     error!("Chunk text was: {:?}", chunk);
-                    return Err(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("Chunk processing failed: {:?}", e),
-                    )));
+                    return Err(Box::new(std::io::Error::other(format!(
+                        "Chunk processing failed: {:?}",
+                        e
+                    ))));
                 }
             }
         }
@@ -236,7 +236,7 @@ impl TTSKoko {
             initial_silence,
         }: TTSOpts,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let audio = self.tts_raw_audio(&txt, lan, style_name, speed, initial_silence)?;
+        let audio = self.tts_raw_audio(txt, lan, style_name, speed, initial_silence)?;
 
         // Save to file
         if mono {
@@ -291,11 +291,11 @@ impl TTSKoko {
             let mut style_portions = Vec::new();
 
             for style in styles {
-                if let Some((name, portion)) = style.split_once('.') {
-                    if let Ok(portion) = portion.parse::<f32>() {
-                        style_names.push(name);
-                        style_portions.push(portion * 0.1);
-                    }
+                if let Some((name, portion)) = style.split_once('.')
+                    && let Ok(portion) = portion.parse::<f32>()
+                {
+                    style_names.push(name);
+                    style_portions.push(portion * 0.1);
                 }
             }
             debug!("styles: {:?}, portions: {:?}", style_names, style_portions);
@@ -306,8 +306,8 @@ impl TTSKoko {
                 if let Some(style) = self.styles.get(*name) {
                     let style_slice = &style[tokens_len][0]; // This is a [256] array
                     // Blend into the blended_style
-                    for j in 0..256 {
-                        blended_style[0][j] += style_slice[j] * portion;
+                    for (j, &value) in style_slice.iter().enumerate().take(256) {
+                        blended_style[0][j] += value * portion;
                     }
                 }
             }
