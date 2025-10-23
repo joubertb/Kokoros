@@ -174,6 +174,63 @@ The `/health` endpoint provides detailed service status information:
 - **Concurrent Processing**: Multi-threaded processing for batch requests
 - **Zero-Copy Operations**: Efficient audio data handling
 
+### ONNX Runtime Thread Configuration
+
+**CRITICAL**: When running multiple Kokoros instances, proper thread pool configuration is essential to prevent CPU contention and timeout errors.
+
+#### Thread Pool Architecture
+ONNX Runtime uses three independent threading systems:
+- **OpenMP threads**: Controls CPU kernel parallelization
+- **ONNX Runtime intra-op threads**: Parallelizes operations within neural network nodes
+- **ONNX Runtime inter-op threads**: Runs different neural network nodes in parallel
+
+#### Configuration Requirements
+Multi-instance deployment requires both:
+1. **Environment variables** set in docker-compose configuration
+2. **Programmatic configuration** in `kokoros/src/onn/ort_base.rs` SessionBuilder
+
+**Critical Note**: Environment variables alone are insufficient. ONNX Runtime's Rust bindings require programmatic API calls to enforce thread limits. Without code-level configuration, all instances will compete for all available CPU cores regardless of environment variable settings.
+
+#### Impact of Proper Configuration
+
+**Without thread limiting**:
+- CPU overload: instances use 10-11 cores each instead of intended 8 cores
+- System capacity exceeded (e.g., 40+ cores used on 32-core system)
+- Audio generation timeouts (70-110+ seconds, exceeding 120s nginx timeout)
+- 504 Gateway errors requiring automatic retries
+- ~5-6% request failure rate on first attempt
+
+**With proper thread limiting**:
+- Each instance uses ~8 cores as intended
+- Total CPU stays within system limits (~31 cores on 32-core system)
+- Audio generation: 20-55 seconds (~3x performance improvement)
+- Zero timeout errors
+- 100% success rate without retries
+
+### Multi-Instance Deployment
+
+Kokoros supports horizontal scaling with multiple instances behind nginx load balancing:
+
+#### Deployment Architecture
+- **Instance Count**: Supports 1-4 instances (recommendation for 32-core system)
+- **Thread Allocation**: Total CPU cores divided evenly among instances (e.g., 32 cores ÷ 4 = 8 cores per instance)
+- **Load Balancing**: Nginx round-robin distribution across all healthy instances
+- **Session Pooling**: Each instance maintains a pool of ONNX Runtime sessions (default: 4) for internal parallelization
+- **Health Monitoring**: `/health` endpoint reports instance status and configuration
+
+#### Scaling Guidelines
+- **Single Instance**: Development/testing, 100% CPU utilization possible
+- **Dual Instance**: Balanced production, moderate load distribution
+- **Triple Instance**: High-performance production
+- **Quad Instance**: Maximum throughput, optimal for 32-core systems
+
+#### Performance Characteristics
+Processing speed improves with additional instances (up to system core count):
+- Single instance: ~2 minutes per page
+- Dual instance: ~1.5 minutes per page
+- Triple instance: ~1.2 minutes per page
+- Quad instance: ~1 minute per page
+
 ### Caching and Optimization
 - **Model Caching**: Keep frequently used models in memory
 - **Audio Caching**: Cache generated audio segments for repeated text
@@ -261,6 +318,46 @@ kokoros/
 └── CLAUDE.md               # This comprehensive documentation
 ```
 
+## Troubleshooting
+
+### 504 Gateway Timeout Errors
+
+**Symptoms**:
+- Worker receives HTML 504 error responses instead of audio
+- Audio generation exceeding 120-second nginx timeout
+- CPU usage per instance significantly exceeds configured limit
+- Multiple automatic retry attempts for same audio segments
+
+**Common Root Cause**: ONNX Runtime thread pools not properly configured
+
+**Verification Steps**:
+1. Check environment variables are set in docker-compose configuration
+2. Verify programmatic thread configuration exists in `kokoros/src/onn/ort_base.rs`
+3. Confirm Kokoros logs show thread configuration on startup
+4. Monitor CPU usage distribution across instances (should be roughly equal)
+
+**Expected Behavior**:
+- Each instance using allocated CPU cores (e.g., ~800% for 8 cores)
+- Total system CPU within capacity (e.g., ~3100% for 4 instances on 32-core system)
+- Audio generation completing in 20-60 seconds
+- No timeout errors or automatic retries
+
+### Performance Monitoring
+
+**Key Metrics**:
+- **Processing Time**: Audio generation should complete in 20-60 seconds per segment
+- **CPU Distribution**: Instances should show balanced CPU usage
+- **Error Rate**: No audio error logs should be created for successful processing
+- **Success Rate**: 100% completion without retries indicates optimal configuration
+
+### Health Check Verification
+
+Health endpoint (`/health`) provides service status including:
+- Service operational status
+- Model load state
+- Audio sample rate and format support
+- ONNX Runtime session pool size
+
 ## Development Notes
 
 - **Model Requirements**: Voice models must be downloaded before first use
@@ -269,3 +366,4 @@ kokoros/
 - **Audio Quality**: Balance between quality and processing speed based on use case
 - **Integration**: Critical component for SpeakDoc's text-to-speech functionality
 - **Port Configuration**: Default port 3025 for Docker deployment
+- **Thread Configuration**: MUST configure ONNX Runtime threads programmatically for multi-instance deployment
