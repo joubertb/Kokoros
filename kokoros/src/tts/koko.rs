@@ -291,11 +291,13 @@ impl TTSKoko {
             let mut style_portions = Vec::new();
 
             for style in styles {
-                if let Some((name, portion)) = style.split_once('.')
-                    && let Ok(portion) = portion.parse::<f32>()
-                {
-                    style_names.push(name);
-                    style_portions.push(portion * 0.1);
+                // Note: Using nested if-let instead of let chains for stable Rust compatibility
+                #[allow(clippy::collapsible_if)]
+                if let Some((name, portion)) = style.split_once('.') {
+                    if let Ok(portion) = portion.parse::<f32>() {
+                        style_names.push(name);
+                        style_portions.push(portion * 0.1);
+                    }
                 }
             }
             debug!("styles: {:?}, portions: {:?}", style_names, style_portions);
