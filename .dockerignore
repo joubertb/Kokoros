@@ -1,8 +1,45 @@
-/data
+# Rust build outputs - exclude compiled artifacts
 /target
+target/
+**/target
+
+# Data directories - will be downloaded during build
+/data
+data/
+
+# Dependencies
 vendor/
+**/vendor
+
+# Audio files - generated at runtime
 *.wav
-*.DS_store
+
+# OS and IDE files
+*.DS_Store
+**/.DS_Store
+.vscode/
+**/.vscode
+.idea/
+**/.idea
+
+# Python virtual environments
 .venv
 venv/
-.vscode/
+**/.venv
+**/venv
+
+# Git
+.git/
+**/.git
+.gitignore
+
+# Documentation
+*.md
+README*
+CLAUDE.md
+
+# Logs and temp files
+*.log
+**/*.log
+tmp/
+**/tmp
