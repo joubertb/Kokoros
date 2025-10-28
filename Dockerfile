@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 FROM rust:1.86.0-slim-bookworm AS builderrs
 
-RUN apt-get update -qq && apt-get install -qq -y wget pkg-config libssl-dev clang git cmake libopus-dev libogg-dev ffmpeg && rustup component add rustfmt
+RUN apt-get update -qq && apt-get install -qq -y wget pkg-config libssl-dev clang git cmake libopus-dev ffmpeg && rustup component add rustfmt
 
 WORKDIR /app
 
@@ -20,7 +20,7 @@ COPY --from=builderrs /app/target/release/koko ./target/release/koko
 COPY --from=builderrs /app/data ./data
 COPY --from=builderrs /app/checkpoints ./checkpoints
 
-RUN chmod +x ./target/release/koko && apt-get update -qq && apt-get install -qq -y pkg-config libssl-dev curl libopus0 libogg0 ffmpeg
+RUN chmod +x ./target/release/koko && apt-get update -qq && apt-get install -qq -y pkg-config libssl-dev curl libopus0 ffmpeg
 
 # Create tmp directory for kokoros temporary files
 RUN mkdir -p tmp

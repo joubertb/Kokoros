@@ -32,16 +32,23 @@ pub trait OrtBase {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(0); // 0 means use default
 
-        info!("Configuring ONNX Runtime with intra_threads={}, inter_threads={}", intra_threads, inter_threads);
+        info!(
+            "Configuring ONNX Runtime with intra_threads={}, inter_threads={}",
+            intra_threads, inter_threads
+        );
 
         match SessionBuilder::new() {
             Ok(mut builder) => {
                 // Configure thread pools if environment variables are set
                 if intra_threads > 0 {
-                    builder = builder.with_intra_threads(intra_threads).map_err(|e| format!("Failed to set intra threads: {}", e))?;
+                    builder = builder
+                        .with_intra_threads(intra_threads)
+                        .map_err(|e| format!("Failed to set intra threads: {}", e))?;
                 }
                 if inter_threads > 0 {
-                    builder = builder.with_inter_threads(inter_threads).map_err(|e| format!("Failed to set inter threads: {}", e))?;
+                    builder = builder
+                        .with_inter_threads(inter_threads)
+                        .map_err(|e| format!("Failed to set inter threads: {}", e))?;
                 }
 
                 let session = builder

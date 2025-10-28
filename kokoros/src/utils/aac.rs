@@ -26,16 +26,24 @@ pub fn pcm_to_aac(pcm_data: &[f32], sample_rate: u32) -> Result<Vec<u8>, std::io
     // Use ffmpeg to convert PCM to AAC
     // ffmpeg -f s16le -ar <sample_rate> -ac 1 -i pipe:0 -c:a aac -b:a <bitrate> -f mp4 -movflags frag_keyframe+empty_moov pipe:1
     let mut child = Command::new("ffmpeg")
-        .args(&[
-            "-f", "s16le",  // Input format: signed 16-bit little-endian PCM
-            "-ar", &sample_rate.to_string(),  // Sample rate
-            "-ac", "1",  // Audio channels: mono
-            "-i", "pipe:0",  // Input from stdin
-            "-c:a", "aac",  // Codec: AAC
-            "-b:a", &format!("{}k", bitrate),  // Bitrate
-            "-f", "mp4",  // Output format: MP4/M4A
-            "-movflags", "frag_keyframe+empty_moov",  // Enable streaming/piping
-            "pipe:1"  // Output to stdout
+        .args([
+            "-f",
+            "s16le", // Input format: signed 16-bit little-endian PCM
+            "-ar",
+            &sample_rate.to_string(), // Sample rate
+            "-ac",
+            "1", // Audio channels: mono
+            "-i",
+            "pipe:0", // Input from stdin
+            "-c:a",
+            "aac", // Codec: AAC
+            "-b:a",
+            &format!("{}k", bitrate), // Bitrate
+            "-f",
+            "mp4", // Output format: MP4/M4A
+            "-movflags",
+            "frag_keyframe+empty_moov", // Enable streaming/piping
+            "pipe:1",                   // Output to stdout
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -45,7 +53,8 @@ pub fn pcm_to_aac(pcm_data: &[f32], sample_rate: u32) -> Result<Vec<u8>, std::io
 
     // Write PCM data to ffmpeg stdin
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(&pcm_bytes)
+        stdin
+            .write_all(&pcm_bytes)
             .map_err(|e| std::io::Error::other(format!("Failed to write to ffmpeg: {}", e)))?;
     }
 
@@ -68,7 +77,7 @@ fn get_configured_bitrate() -> u32 {
     let bitrate_str = env::var("AAC_BITRATE").unwrap_or_else(|_| "128".to_string());
 
     match bitrate_str.parse::<u32>() {
-        Ok(bitrate) if bitrate >= 32 && bitrate <= 320 => bitrate,
+        Ok(bitrate) if (32..=320).contains(&bitrate) => bitrate,
         _ => {
             warn!(
                 "Invalid AAC_BITRATE '{}', defaulting to 128kbps",
