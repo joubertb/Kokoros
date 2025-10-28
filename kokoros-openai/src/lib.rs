@@ -10,6 +10,8 @@ use kokoros::{
     tts::koko::{InitConfig as TTSKokoInitConfig, TTSKoko},
     utils::mp3::pcm_to_mp3,
     utils::wav::{WavHeader, write_audio_chunk},
+    utils::webm::pcm_to_webm,
+    utils::aac::pcm_to_aac,
 };
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
@@ -22,6 +24,8 @@ enum AudioFormat {
     #[default]
     Wav,
     Mp3,
+    Webm,
+    Aac,
 }
 
 #[derive(Deserialize)]
@@ -258,6 +262,18 @@ async fn handle_tts(
                 pcm_to_mp3(&raw_audio, sample_rate).map_err(SpeechError::Mp3Conversion)?;
 
             ("audio/mpeg", mp3_data)
+        }
+        AudioFormat::Webm => {
+            let webm_data =
+                pcm_to_webm(&raw_audio, sample_rate).map_err(SpeechError::Mp3Conversion)?;
+
+            ("audio/webm", webm_data)
+        }
+        AudioFormat::Aac => {
+            let aac_data =
+                pcm_to_aac(&raw_audio, sample_rate).map_err(SpeechError::Mp3Conversion)?;
+
+            ("audio/mp4", aac_data)
         }
     };
 
