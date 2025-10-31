@@ -52,6 +52,14 @@ struct SpeechRequest {
     #[allow(dead_code)]
     model: String,
 
+    /// Input text to synthesize. Supports pause tags for mid-text pauses:
+    /// - `<pause>` - Insert default pause (500ms = 0.5 seconds)
+    /// - `<pause:N>` - Insert custom pause with N milliseconds (e.g., `<pause:1000>` for 1 second)
+    ///
+    /// Examples:
+    /// - "Hello there. <pause> How are you?"  // 500ms pause
+    /// - "First part. <pause:2000> After a 2 second pause."
+    /// - "A <pause:250> B <pause:500> C <pause:1000> D"
     input: String,
 
     #[serde(default)]
@@ -65,6 +73,8 @@ struct SpeechRequest {
     #[serde(default)]
     speed: Speed,
 
+    /// Optional silence tokens to add at the beginning of the audio.
+    /// Note: Pause tags within the text are handled separately.
     #[serde(default)]
     initial_silence: Option<usize>,
 }

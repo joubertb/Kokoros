@@ -32,6 +32,7 @@ This directory contains the Kokoros text-to-speech (TTS) engine - a high-quality
 - **High Audio Quality**: Professional-grade audio output
 - **Batch Processing**: Efficient processing of multiple text segments
 - **Streaming Output**: Real-time audio generation for large texts
+- **Configurable Pause Support**: Insert pauses at any position in text using `<pause>` and `<pause:N>` tags
 
 ### OpenAI-Compatible API (`kokoros-openai/`)
 - **API Compatibility**: OpenAI TTS API-compatible interface
@@ -88,9 +89,10 @@ This directory contains the Kokoros text-to-speech (TTS) engine - a high-quality
 
 ### Text Processing
 1. **Text Input**: Receive text from SpeakDoc worker service
-2. **Text Normalization**: Clean and normalize input text for TTS
-3. **Phoneme Conversion**: Convert text to phonetic representation
-4. **Prosody Analysis**: Determine stress, intonation, and rhythm patterns
+2. **Pause Tag Processing**: Split text at `<pause>` and `<pause:N>` tags into segments
+3. **Text Normalization**: Clean and normalize input text for TTS
+4. **Phoneme Conversion**: Convert text to phonetic representation
+5. **Prosody Analysis**: Determine stress, intonation, and rhythm patterns
 
 ### Voice Synthesis
 1. **Model Loading**: Load appropriate voice model checkpoint
@@ -103,6 +105,167 @@ This directory contains the Kokoros text-to-speech (TTS) engine - a high-quality
 2. **Quality Optimization**: Apply compression and quality settings
 3. **Streaming Delivery**: Send audio back to requesting service
 4. **Caching**: Optional caching of generated audio segments
+
+## Pause Tag Support
+
+Kokoros TTS supports configurable pauses at any position in text using XML-style tags. This feature enables precise control over speech timing and pacing.
+
+### Pause Tag Syntax
+
+**Basic Pause (default duration):**
+```
+"Hello there. <pause> How are you?"
+```
+- Uses default duration of 500ms (0.5 seconds)
+- Inserts a natural pause between sentences or phrases
+
+**Custom Pause Duration:**
+```
+"First part. <pause:2000> After a 2 second pause."
+```
+- Specify custom duration in milliseconds
+- Example: `<pause:2000>` creates a 2.0 second pause
+
+**Multiple Pauses:**
+```
+"A <pause:250> B <pause:500> C <pause:1000> D"
+```
+- Supports unlimited pause tags in a single text
+- Each pause can have its own custom duration
+
+### Duration Guidelines
+
+Pause duration is specified in **milliseconds**. The tag value directly represents the pause length:
+
+| Tag | Duration | Use Case |
+|-----|----------|----------|
+| `<pause:100>` | 0.1 sec | Very brief pause between words |
+| `<pause:250>` | 0.25 sec | Quick breath |
+| `<pause:500>` | 0.5 sec | **Default** - natural sentence pause |
+| `<pause:1000>` | 1.0 sec | Clear sentence break |
+| `<pause:1500>` | 1.5 sec | Paragraph transition |
+| `<pause:2000>` | 2.0 sec | Paragraph break, dramatic pause |
+| `<pause:3000>` | 3.0 sec | Extended pause, section break |
+| `<pause:5000>` | 5.0 sec | Very long pause |
+
+### Implementation Details
+
+**How It Works:**
+1. **Tag Detection**: Regex pattern `<pause(?::(\d+))?>` identifies pause tags in input text
+2. **Text Segmentation**: Text is split into segments at each pause tag location
+3. **Silent Audio Insertion**: Pure silence (zero samples) inserted at segment boundaries
+4. **Audio Generation**: Each segment is processed separately and concatenated with silence
+5. **Backward Compatibility**: Text without pause tags is processed normally
+
+**Technical Implementation:**
+- File: `kokoros/kokoros/src/tts/koko.rs`
+- Function: `split_text_by_pauses()` - Parses tags and segments text
+- Function: `tts_raw_audio()` - Enhanced to insert silent audio between segments
+- Default: `DEFAULT_PAUSE_TOKENS = 500` (500ms)
+- Method: Inserts silent audio samples (0.0 values) rather than using TTS tokens
+- Formula: `silence_samples = sample_rate * duration_ms / 1000`
+
+### API Usage
+
+**OpenAI-Compatible Endpoint:**
+```bash
+curl -X POST http://localhost:3025/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "kokoro",
+    "input": "Hello there. <pause> How are you? <pause:2000> Let me continue.",
+    "voice": "af_sky",
+    "response_format": "wav"
+  }' --output output.wav
+```
+
+**Request Parameters:**
+- `input`: Text with embedded `<pause>` and `<pause:N>` tags (N in milliseconds)
+- `voice`: Voice model to use (e.g., "af_sky")
+- `speed`: Speech speed multiplier (default: 1.0)
+- `initial_silence`: Optional silence duration at start in milliseconds (independent of pause tags)
+- `response_format`: Output format (wav, mp3, webm, aac)
+
+### Use Cases
+
+**Natural Pacing:**
+```
+"Welcome to our service. <pause> Let me explain how it works."
+```
+- Default 500ms pause for natural speech flow
+
+**Dramatic Effect:**
+```
+"And the winner is... <pause:3000> John Smith!"
+```
+- 3 second pause for dramatic tension
+
+**List Reading:**
+```
+"Item one <pause:250> Item two <pause:250> Item three"
+```
+- Brief 250ms pauses between list items
+
+**Section Breaks:**
+```
+"End of chapter one. <pause:2000> Chapter two begins now."
+```
+- 2 second pause between major sections
+
+**Emphasis:**
+```
+"This is <pause:500> very <pause:500> important."
+```
+- 500ms pauses for emphasis on key words
+
+### Worker Integration
+
+The SpeakDoc worker service can include pause tags in text sent to Kokoros:
+
+```python
+# In worker text processing
+processed_text = "Introduction to the topic. <pause:1000> Now let's discuss details."
+audio = kokoros_api.generate_speech(processed_text, voice="af_sky")
+```
+
+**Note**: The worker's `_finalize_pause_tags()` method currently converts `<pause>` tags to periods (`.`). To use the Kokoros pause feature:
+- Option 1: Modify worker to pass through `<pause:N>` tags unchanged
+- Option 2: Continue using periods for natural TTS pauses (current behavior)
+- Option 3: Use `<pause:N>` tags in special cases where precise timing is needed
+
+### Testing
+
+Unit tests verify pause tag functionality:
+
+```bash
+cd kokoros/kokoros
+cargo test test_pause
+```
+
+**Tests Included:**
+- `test_pause_tag_regex` - Validates tag pattern matching
+- `test_split_text_by_pauses_logic` - Validates text segmentation
+
+### Benefits
+
+- ✅ **Precise Control**: Exact millisecond-level control over pause duration
+- ✅ **Intuitive Values**: Tag value directly represents milliseconds (e.g., `<pause:1000>` = 1 second)
+- ✅ **Easy Integration**: Simple XML-style tags, no API changes required
+- ✅ **Backward Compatible**: Existing text without tags works unchanged
+- ✅ **Clean Audio**: Inserts pure silence, no TTS artifacts or strange sounds
+- ✅ **Flexible**: Each pause can have custom duration
+- ✅ **Natural Speech**: Improves pacing and comprehension
+
+### Measuring Pause Duration
+
+An analysis tool is provided to measure actual pause durations in generated audio:
+
+```bash
+cd /path/to/kokoros
+python3 analyze_pause.py output.wav
+```
+
+This tool detects silence regions and reports their timing, useful for verifying pause behavior and calibrating duration values.
 
 ## API Integration with SpeakDoc
 
