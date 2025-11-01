@@ -1,6 +1,7 @@
 use crate::onn::ort_koko::{self};
 use crate::tts::tokenize::tokenize;
 use crate::utils;
+use lazy_static::lazy_static;
 use log::{debug, error, info};
 use ndarray::Array3;
 use ndarray_npy::NpzReader;
@@ -11,6 +12,11 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use espeak_rs::text_to_phonemes;
+
+// Compile the pause tag regex only once at startup
+lazy_static! {
+    static ref PAUSE_REGEX: Regex = Regex::new(r"<pause(?::(\d+))?>").unwrap();
+}
 
 /// Represents a text segment with an optional pause duration (in milliseconds) to prepend
 #[derive(Debug, Clone)]
@@ -104,14 +110,11 @@ impl TTSKoko {
     /// - "Hello <pause> world" -> [("Hello", None), ("world", Some(500))]  // 500ms default
     /// - "A <pause:1000> B <pause:2000> C" -> [("A", None), ("B", Some(1000)), ("C", Some(2000))]  // 1s and 2s
     fn split_text_by_pauses(&self, text: &str) -> Vec<TextSegment> {
-        // Regex to match <pause> or <pause:N> tags
-        let pause_regex = Regex::new(r"<pause(?::(\d+))?>").unwrap();
-
         let mut segments = Vec::new();
         let mut last_end = 0;
         let mut pending_pause: Option<usize> = None;
 
-        for cap in pause_regex.captures_iter(text) {
+        for cap in PAUSE_REGEX.captures_iter(text) {
             let match_obj = cap.get(0).unwrap();
             let match_start = match_obj.start();
             let match_end = match_obj.end();
@@ -475,23 +478,21 @@ mod tests {
     #[test]
     fn test_pause_tag_regex() {
         // Test basic pause tag detection
-        let pause_regex = Regex::new(r"<pause(?::(\d+))?>").unwrap();
-
         // Test <pause> without duration
         let text = "Hello <pause> world";
-        let matches: Vec<_> = pause_regex.captures_iter(text).collect();
+        let matches: Vec<_> = PAUSE_REGEX.captures_iter(text).collect();
         assert_eq!(matches.len(), 1);
         assert!(matches[0].get(1).is_none()); // No duration specified
 
         // Test <pause:30> with duration
         let text = "Hello <pause:30> world";
-        let matches: Vec<_> = pause_regex.captures_iter(text).collect();
+        let matches: Vec<_> = PAUSE_REGEX.captures_iter(text).collect();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].get(1).unwrap().as_str(), "30");
 
         // Test multiple pauses
         let text = "A <pause> B <pause:10> C <pause:50> D";
-        let matches: Vec<_> = pause_regex.captures_iter(text).collect();
+        let matches: Vec<_> = PAUSE_REGEX.captures_iter(text).collect();
         assert_eq!(matches.len(), 3);
         assert!(matches[0].get(1).is_none());
         assert_eq!(matches[1].get(1).unwrap().as_str(), "10");
@@ -503,14 +504,12 @@ mod tests {
         // Note: This test doesn't require a full TTSKoko instance
         // We're just testing the regex logic directly
 
-        let pause_regex = Regex::new(r"<pause(?::(\d+))?>").unwrap();
-
         // Test simple case
         let text = "Hello <pause> world";
         let mut segments = Vec::new();
         let mut last_end = 0;
 
-        for cap in pause_regex.captures_iter(text) {
+        for cap in PAUSE_REGEX.captures_iter(text) {
             let match_obj = cap.get(0).unwrap();
             let before = &text[last_end..match_obj.start()];
             segments.push(before);
