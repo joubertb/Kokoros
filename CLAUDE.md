@@ -106,64 +106,100 @@ This directory contains the Kokoros text-to-speech (TTS) engine - a high-quality
 3. **Streaming Delivery**: Send audio back to requesting service
 4. **Caching**: Optional caching of generated audio segments
 
-## Pause Tag Support
+## SSML Break Tag Support
 
-Kokoros TTS supports configurable pauses at any position in text using XML-style tags. This feature enables precise control over speech timing and pacing.
+Kokoros TTS supports SSML (Speech Synthesis Markup Language) `<break>` tags for configurable pauses at any position in text. This feature enables precise control over speech timing and pacing using industry-standard SSML syntax.
 
-### Pause Tag Syntax
+### SSML Break Tag Syntax
 
-**Basic Pause (default duration):**
+**Basic Break (default duration):**
 ```
-"Hello there. <pause> How are you?"
+"Hello there. <break/> How are you?"
 ```
 - Uses default duration of 500ms (0.5 seconds)
 - Inserts a natural pause between sentences or phrases
 
-**Custom Pause Duration:**
+**Custom Break Duration with Time:**
 ```
-"First part. <pause:2000> After a 2 second pause."
+"First part. <break time="2s"/> After a 2 second pause."
+"Quick pause. <break time="500ms"/> Continue."
 ```
-- Specify custom duration in milliseconds
-- Example: `<pause:2000>` creates a 2.0 second pause
+- Specify custom duration with `time` attribute
+- Supports milliseconds (ms) or seconds (s) units
+- Examples: `<break time="2s"/>` (2 seconds), `<break time="500ms"/>` (0.5 seconds)
+- Decimal seconds supported: `<break time="2.5s"/>` (2.5 seconds)
 
-**Multiple Pauses:**
+**Break Duration with Strength:**
 ```
-"A <pause:250> B <pause:500> C <pause:1000> D"
+"Soft pause. <break strength="weak"/> Continue."
+"Strong pause. <break strength="strong"/> Resume."
 ```
-- Supports unlimited pause tags in a single text
-- Each pause can have its own custom duration
+- Specify predefined strength levels
+- Strength values map to specific durations (see table below)
+
+**Multiple Breaks:**
+```
+"A <break time="250ms"/> B <break time="1s"/> C <break strength="strong"/> D"
+```
+- Supports unlimited break tags in a single text
+- Each break can have its own custom time or strength
 
 ### Duration Guidelines
 
-Pause duration is specified in **milliseconds**. The tag value directly represents the pause length:
+#### Time Attribute
+
+Break duration can be specified with the `time` attribute using milliseconds (ms) or seconds (s):
 
 | Tag | Duration | Use Case |
 |-----|----------|----------|
-| `<pause:100>` | 0.1 sec | Very brief pause between words |
-| `<pause:250>` | 0.25 sec | Quick breath |
-| `<pause:500>` | 0.5 sec | **Default** - natural sentence pause |
-| `<pause:1000>` | 1.0 sec | Clear sentence break |
-| `<pause:1500>` | 1.5 sec | Paragraph transition |
-| `<pause:2000>` | 2.0 sec | Paragraph break, dramatic pause |
-| `<pause:3000>` | 3.0 sec | Extended pause, section break |
-| `<pause:5000>` | 5.0 sec | Very long pause |
+| `<break time="100ms"/>` | 0.1 sec | Very brief pause between words |
+| `<break time="250ms"/>` | 0.25 sec | Quick breath |
+| `<break time="500ms"/>` | 0.5 sec | Natural sentence pause |
+| `<break time="1s"/>` | 1.0 sec | Clear sentence break |
+| `<break time="1.5s"/>` | 1.5 sec | Paragraph transition |
+| `<break time="2s"/>` | 2.0 sec | Paragraph break, dramatic pause |
+| `<break time="3s"/>` | 3.0 sec | Extended pause, section break |
+| `<break time="5s"/>` | 5.0 sec | Very long pause |
+| `<break/>` | 0.5 sec | **Default** - no attributes |
+
+#### Strength Attribute
+
+Predefined strength levels provide semantic pause durations:
+
+| Tag | Duration | Use Case |
+|-----|----------|----------|
+| `<break strength="x-weak"/>` | 100ms | Minimal pause |
+| `<break strength="weak"/>` | 250ms | Brief pause |
+| `<break strength="medium"/>` | 500ms | **Default** - natural pause |
+| `<break strength="strong"/>` | 1000ms | Emphatic pause |
+| `<break strength="x-strong"/>` | 2000ms | Very emphatic pause |
 
 ### Implementation Details
 
 **How It Works:**
-1. **Tag Detection**: Regex pattern `<pause(?::(\d+))?>` identifies pause tags in input text
-2. **Text Segmentation**: Text is split into segments at each pause tag location
-3. **Silent Audio Insertion**: Pure silence (zero samples) inserted at segment boundaries
-4. **Audio Generation**: Each segment is processed separately and concatenated with silence
-5. **Backward Compatibility**: Text without pause tags is processed normally
+1. **Tag Detection**: Regex pattern `<break(?:\s+(?:time="([^"]+)"|strength="([^"]+)"))*\s*/>` identifies SSML break tags in input text
+2. **Attribute Parsing**: Extracts and parses `time` or `strength` attributes
+3. **Duration Conversion**: Converts time units (s → ms) and strength values to millisecond durations
+4. **Text Segmentation**: Text is split into segments at each break tag location
+5. **Silent Audio Insertion**: Pure silence (zero samples) inserted at segment boundaries
+6. **Audio Generation**: Each segment is processed separately and concatenated with silence
+7. **Error Handling**: Invalid formats log errors and fall back to default 500ms duration
 
 **Technical Implementation:**
 - File: `kokoros/kokoros/src/tts/koko.rs`
-- Function: `split_text_by_pauses()` - Parses tags and segments text
+- Function: `split_text_by_pauses()` - Parses SSML break tags and segments text
+- Function: `time_to_duration_ms()` - Converts time attributes (ms/s) to milliseconds
+- Function: `strength_to_duration_ms()` - Maps strength values to millisecond durations
 - Function: `tts_raw_audio()` - Enhanced to insert silent audio between segments
-- Default: `DEFAULT_PAUSE_TOKENS = 500` (500ms)
+- Default: `DEFAULT_BREAK_DURATION_MS = 500` (500ms)
 - Method: Inserts silent audio samples (0.0 values) rather than using TTS tokens
 - Formula: `silence_samples = sample_rate * duration_ms / 1000`
+
+**Error Handling:**
+- Invalid time values (e.g., `<break time="abc"/>`) → Log error, use default 500ms
+- Invalid time units (e.g., `<break time="500h"/>`) → Log error, use default 500ms
+- Invalid strength values (e.g., `<break strength="super"/>`) → Log error, use default 500ms
+- Missing unit in time (e.g., `<break time="500"/>`) → Log error, use default 500ms
 
 ### API Usage
 
@@ -173,90 +209,96 @@ curl -X POST http://localhost:3025/v1/audio/speech \
   -H "Content-Type: application/json" \
   -d '{
     "model": "kokoro",
-    "input": "Hello there. <pause> How are you? <pause:2000> Let me continue.",
+    "input": "Hello there. <break/> How are you? <break time=\"2s\"/> Let me continue.",
     "voice": "af_sky",
     "response_format": "wav"
   }' --output output.wav
 ```
 
 **Request Parameters:**
-- `input`: Text with embedded `<pause>` and `<pause:N>` tags (N in milliseconds)
+- `input`: Text with embedded SSML `<break>` tags
 - `voice`: Voice model to use (e.g., "af_sky")
 - `speed`: Speech speed multiplier (default: 1.0)
-- `initial_silence`: Optional silence duration at start in milliseconds (independent of pause tags)
+- `initial_silence`: Optional silence duration at start in milliseconds (independent of break tags)
 - `response_format`: Output format (wav, mp3, webm, aac)
 
 ### Use Cases
 
 **Natural Pacing:**
 ```
-"Welcome to our service. <pause> Let me explain how it works."
+"Welcome to our service. <break/> Let me explain how it works."
 ```
 - Default 500ms pause for natural speech flow
 
 **Dramatic Effect:**
 ```
-"And the winner is... <pause:3000> John Smith!"
+"And the winner is... <break time=\"3s\"/> John Smith!"
 ```
 - 3 second pause for dramatic tension
 
 **List Reading:**
 ```
-"Item one <pause:250> Item two <pause:250> Item three"
+"Item one <break time=\"250ms\"/> Item two <break time=\"250ms\"/> Item three"
 ```
 - Brief 250ms pauses between list items
 
 **Section Breaks:**
 ```
-"End of chapter one. <pause:2000> Chapter two begins now."
+"End of chapter one. <break time=\"2s\"/> Chapter two begins now."
 ```
 - 2 second pause between major sections
 
-**Emphasis:**
+**Emphasis with Strength:**
 ```
-"This is <pause:500> very <pause:500> important."
+"This is <break strength=\"medium\"/> very <break strength=\"strong\"/> important."
 ```
-- 500ms pauses for emphasis on key words
+- Semantic strength values for varying emphasis
+
+**Mixed Time Units:**
+```
+"Quick. <break time=\"250ms\"/> Medium. <break time=\"1s\"/> Long. <break time=\"2.5s\"/> Done."
+```
+- Combine milliseconds and seconds as needed
 
 ### Worker Integration
 
-The SpeakDoc worker service can include pause tags in text sent to Kokoros:
+The SpeakDoc worker service can include SSML break tags in text sent to Kokoros:
 
 ```python
 # In worker text processing
-processed_text = "Introduction to the topic. <pause:1000> Now let's discuss details."
+processed_text = "Introduction to the topic. <break time=\"1s\"/> Now let's discuss details."
 audio = kokoros_api.generate_speech(processed_text, voice="af_sky")
 ```
 
-**Note**: The worker's `_finalize_pause_tags()` method currently converts `<pause>` tags to periods (`.`). To use the Kokoros pause feature:
-- Option 1: Modify worker to pass through `<pause:N>` tags unchanged
-- Option 2: Continue using periods for natural TTS pauses (current behavior)
-- Option 3: Use `<pause:N>` tags in special cases where precise timing is needed
+**Note**: Worker integration may require updates to generate SSML break tags instead of legacy pause tags.
 
 ### Testing
 
-Unit tests verify pause tag functionality:
+Unit tests verify SSML break tag functionality:
 
 ```bash
 cd kokoros/kokoros
-cargo test test_pause
+cargo test koko::tests
 ```
 
 **Tests Included:**
-- `test_pause_tag_regex` - Validates tag pattern matching
-- `test_split_text_by_pauses_logic` - Validates text segmentation
+- `test_break_tag_regex` - Validates SSML break tag pattern matching
+- `test_time_to_duration_ms` - Validates time attribute parsing (ms, s, decimal s)
+- `test_strength_to_duration_ms` - Validates strength attribute mapping
+- `test_split_text_by_breaks_logic` - Validates text segmentation with SSML breaks
 
 ### Benefits
 
+- ✅ **SSML Standard**: Uses industry-standard SSML syntax for broad compatibility
 - ✅ **Precise Control**: Exact millisecond-level control over pause duration
-- ✅ **Intuitive Values**: Tag value directly represents milliseconds (e.g., `<pause:1000>` = 1 second)
-- ✅ **Easy Integration**: Simple XML-style tags, no API changes required
-- ✅ **Backward Compatible**: Existing text without tags works unchanged
+- ✅ **Flexible Units**: Support for milliseconds (ms) and seconds (s), including decimals
+- ✅ **Semantic Strength**: Predefined strength levels (x-weak to x-strong) for intuitive control
+- ✅ **Easy Integration**: Standard SSML tags, no proprietary syntax
+- ✅ **Error Resilience**: Invalid formats log errors and gracefully fall back to defaults
 - ✅ **Clean Audio**: Inserts pure silence, no TTS artifacts or strange sounds
-- ✅ **Flexible**: Each pause can have custom duration
 - ✅ **Natural Speech**: Improves pacing and comprehension
 
-### Measuring Pause Duration
+### Measuring Break Duration
 
 An analysis tool is provided to measure actual pause durations in generated audio:
 
@@ -265,7 +307,7 @@ cd /path/to/kokoros
 python3 analyze_pause.py output.wav
 ```
 
-This tool detects silence regions and reports their timing, useful for verifying pause behavior and calibrating duration values.
+This tool detects silence regions and reports their timing, useful for verifying break behavior and calibrating duration values.
 
 ## API Integration with SpeakDoc
 

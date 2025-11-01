@@ -43,7 +43,7 @@ pub fn pcm_to_aac(pcm_data: &[f32], sample_rate: u32) -> Result<Vec<u8>, std::io
             "mp4", // Output format: MP4/M4A
             "-movflags",
             "frag_keyframe+empty_moov+default_base_moof", // Enable streaming with MediaSource API compatibility
-            "pipe:1",                   // Output to stdout
+            "pipe:1",                                     // Output to stdout
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

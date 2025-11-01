@@ -13,21 +13,56 @@ use std::sync::{Arc, Mutex};
 
 use espeak_rs::text_to_phonemes;
 
-// Compile the pause tag regex only once at startup
+// Compile the SSML break tag regex only once at startup
+// Matches: <break time="500ms"/>, <break time="2s"/>, <break strength="weak"/>, <break/>
 lazy_static! {
-    static ref PAUSE_REGEX: Regex = Regex::new(r"<pause(?::(\d+))?>").unwrap();
+    static ref BREAK_REGEX: Regex =
+        Regex::new(r#"<break(?:\s+(?:time="([^"]+)"|strength="([^"]+)"))*\s*/>"#).unwrap();
 }
 
-/// Represents a text segment with an optional pause duration (in milliseconds) to prepend
+/// Represents a text segment with an optional break duration (in milliseconds) to prepend
 #[derive(Debug, Clone)]
 struct TextSegment {
     text: String,
-    pause_tokens: Option<usize>, // Actually pause duration in milliseconds
+    pause_duration_ms: Option<usize>, // Break duration in milliseconds (from SSML <break> tag)
 }
 
-/// Default pause duration when <pause> tag is used without explicit duration
+/// Default break duration when <break/> tag is used without explicit duration
 /// Value is in milliseconds: 500ms = 0.5 seconds
-const DEFAULT_PAUSE_TOKENS: usize = 500;
+const DEFAULT_BREAK_DURATION_MS: usize = 500;
+
+/// Parse SSML break strength attribute to millisecond duration
+fn strength_to_duration_ms(strength: &str) -> Result<usize, String> {
+    match strength {
+        "x-weak" => Ok(100),
+        "weak" => Ok(250),
+        "medium" => Ok(500),
+        "strong" => Ok(1000),
+        "x-strong" => Ok(2000),
+        _ => Err(format!("Invalid strength value: {}", strength)),
+    }
+}
+
+/// Parse SSML time attribute (e.g., "500ms", "2s", "2.5s") to millisecond duration
+fn time_to_duration_ms(time_str: &str) -> Result<usize, String> {
+    if time_str.ends_with("ms") {
+        let value = time_str.trim_end_matches("ms");
+        value
+            .parse::<usize>()
+            .map_err(|_| format!("Invalid millisecond value: {}", value))
+    } else if time_str.ends_with('s') {
+        let value = time_str.trim_end_matches('s');
+        value
+            .parse::<f64>()
+            .map(|s| (s * 1000.0) as usize)
+            .map_err(|_| format!("Invalid second value: {}", value))
+    } else {
+        Err(format!(
+            "Invalid time format (must end with 'ms' or 's'): {}",
+            time_str
+        ))
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct TTSOpts<'a> {
@@ -101,71 +136,97 @@ impl TTSKoko {
         }
     }
 
-    /// Splits text by <pause> and <pause:N> tags into segments with pause information
+    /// Splits text by SSML <break> tags into segments with break duration information
     ///
-    /// The pause tag applies to the text segment that comes AFTER it.
-    /// The N value represents milliseconds of pause.
+    /// The break tag applies to the text segment that comes AFTER it.
     ///
     /// Examples:
-    /// - "Hello <pause> world" -> [("Hello", None), ("world", Some(500))]  // 500ms default
-    /// - "A <pause:1000> B <pause:2000> C" -> [("A", None), ("B", Some(1000)), ("C", Some(2000))]  // 1s and 2s
+    /// - "Hello <break/> world" -> [("Hello", None), ("world", Some(500))]  // 500ms default
+    /// - "A <break time=\"1s\"/> B <break time=\"2s\"/> C" -> [("A", None), ("B", Some(1000)), ("C", Some(2000))]
+    /// - "X <break strength=\"weak\"/> Y" -> [("X", None), ("Y", Some(250))]  // weak = 250ms
     fn split_text_by_pauses(&self, text: &str) -> Vec<TextSegment> {
         let mut segments = Vec::new();
         let mut last_end = 0;
         let mut pending_pause: Option<usize> = None;
 
-        for cap in PAUSE_REGEX.captures_iter(text) {
+        for cap in BREAK_REGEX.captures_iter(text) {
             let match_obj = cap.get(0).unwrap();
             let match_start = match_obj.start();
             let match_end = match_obj.end();
 
-            // Extract the text before this pause tag
+            // Extract the text before this break tag
             let text_segment = &text[last_end..match_start];
 
             // Add the text segment with any pending pause from the previous tag
             if !text_segment.trim().is_empty() {
                 segments.push(TextSegment {
                     text: text_segment.to_string(),
-                    pause_tokens: pending_pause,
+                    pause_duration_ms: pending_pause,
                 });
             }
 
-            // Parse pause duration from capture group (or use default)
+            // Parse break duration from time or strength attributes
             // This pause will apply to the NEXT segment
-            pending_pause = Some(
-                cap.get(1)
-                    .and_then(|m| m.as_str().parse::<usize>().ok())
-                    .unwrap_or(DEFAULT_PAUSE_TOKENS),
-            );
+            let duration_ms = if let Some(time_match) = cap.get(1) {
+                // time attribute present (e.g., time="500ms" or time="2s")
+                let time_str = time_match.as_str();
+                match time_to_duration_ms(time_str) {
+                    Ok(ms) => ms,
+                    Err(err) => {
+                        error!(
+                            "Invalid SSML break time attribute '{}': {}. Using default {}ms",
+                            time_str, err, DEFAULT_BREAK_DURATION_MS
+                        );
+                        DEFAULT_BREAK_DURATION_MS
+                    }
+                }
+            } else if let Some(strength_match) = cap.get(2) {
+                // strength attribute present (e.g., strength="weak")
+                let strength_str = strength_match.as_str();
+                match strength_to_duration_ms(strength_str) {
+                    Ok(ms) => ms,
+                    Err(err) => {
+                        error!(
+                            "Invalid SSML break strength attribute '{}': {}. Using default {}ms",
+                            strength_str, err, DEFAULT_BREAK_DURATION_MS
+                        );
+                        DEFAULT_BREAK_DURATION_MS
+                    }
+                }
+            } else {
+                // No attributes, use default (e.g., <break/>)
+                DEFAULT_BREAK_DURATION_MS
+            };
 
+            pending_pause = Some(duration_ms);
             last_end = match_end;
         }
 
-        // Add remaining text after last pause tag, with any pending pause
+        // Add remaining text after last break tag, with any pending pause
         if last_end < text.len() {
             let remaining_text = &text[last_end..];
             if !remaining_text.trim().is_empty() {
                 segments.push(TextSegment {
                     text: remaining_text.to_string(),
-                    pause_tokens: pending_pause,
+                    pause_duration_ms: pending_pause,
                 });
             }
         }
 
-        // If no pause tags were found, return the entire text as a single segment
+        // If no break tags were found, return the entire text as a single segment
         if segments.is_empty() && !text.trim().is_empty() {
             segments.push(TextSegment {
                 text: text.to_string(),
-                pause_tokens: None,
+                pause_duration_ms: None,
             });
         }
 
-        debug!("Split text into {} segments with pauses", segments.len());
+        debug!("Split text into {} segments with breaks", segments.len());
         for (i, seg) in segments.iter().enumerate() {
             debug!(
-                "  Segment {}: pause_tokens={:?}, text_len={}",
+                "  Segment {}: pause_duration_ms={:?}, text_len={}",
                 i,
-                seg.pause_tokens,
+                seg.pause_duration_ms,
                 seg.text.len()
             );
         }
@@ -260,32 +321,32 @@ impl TTSKoko {
         speed: f32,
         initial_silence: Option<usize>,
     ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-        // First, split text by pause tags
+        // First, split text by SSML break tags
         let segments = self.split_text_by_pauses(txt);
         let mut final_audio = Vec::new();
 
         for (segment_idx, segment) in segments.iter().enumerate() {
             debug!(
-                "Processing segment {}/{}: pause_tokens={:?}, text_len={}",
+                "Processing segment {}/{}: pause_duration_ms={:?}, text_len={}",
                 segment_idx + 1,
                 segments.len(),
-                segment.pause_tokens,
+                segment.pause_duration_ms,
                 segment.text.len()
             );
 
             // Determine the silence duration for this segment
             // First segment uses the passed-in initial_silence
-            // Subsequent segments use pause_tokens from the pause tag
+            // Subsequent segments use pause_duration_ms from the break tag
             let silence_tokens = if segment_idx == 0 {
                 initial_silence
             } else {
-                segment.pause_tokens
+                segment.pause_duration_ms
             };
 
             // If this segment needs silence before it, insert silent audio samples
             if let Some(pause_duration_ms) = silence_tokens {
-                // The pause tag value directly represents milliseconds
-                // e.g., <pause:1000> = 1 second, <pause:500> = 0.5 seconds
+                // The break tag value directly represents milliseconds
+                // e.g., <break time="1s"/> = 1 second, <break time="500ms"/> = 0.5 seconds
                 let silence_duration_ms = pause_duration_ms as f32;
                 let silence_samples =
                     (self.init_config.sample_rate as f32 * silence_duration_ms / 1000.0) as usize;
@@ -304,7 +365,7 @@ impl TTSKoko {
             let max_chunk_tokens = 500 - 20; // Extra 20 token safety margin (no longer need space for silence tokens)
             let chunks = self.split_text_into_chunks(&segment.text, max_chunk_tokens.max(100)); // Minimum 100 tokens
 
-            for (_chunk_idx, chunk) in chunks.iter().enumerate() {
+            for chunk in chunks.iter() {
                 // Convert chunk to phonemes
                 let phonemes = text_to_phonemes(chunk, lan, None, true, false)
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
@@ -476,40 +537,87 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_pause_tag_regex() {
-        // Test basic pause tag detection
-        // Test <pause> without duration
-        let text = "Hello <pause> world";
-        let matches: Vec<_> = PAUSE_REGEX.captures_iter(text).collect();
+    fn test_break_tag_regex() {
+        // Test <break/> without attributes
+        let text = "Hello <break/> world";
+        let matches: Vec<_> = BREAK_REGEX.captures_iter(text).collect();
         assert_eq!(matches.len(), 1);
-        assert!(matches[0].get(1).is_none()); // No duration specified
+        assert!(matches[0].get(1).is_none()); // No time attribute
+        assert!(matches[0].get(2).is_none()); // No strength attribute
 
-        // Test <pause:30> with duration
-        let text = "Hello <pause:30> world";
-        let matches: Vec<_> = PAUSE_REGEX.captures_iter(text).collect();
+        // Test <break time="500ms"/>
+        let text = "Hello <break time=\"500ms\"/> world";
+        let matches: Vec<_> = BREAK_REGEX.captures_iter(text).collect();
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].get(1).unwrap().as_str(), "30");
+        assert_eq!(matches[0].get(1).unwrap().as_str(), "500ms");
 
-        // Test multiple pauses
-        let text = "A <pause> B <pause:10> C <pause:50> D";
-        let matches: Vec<_> = PAUSE_REGEX.captures_iter(text).collect();
+        // Test <break time="2s"/>
+        let text = "Hello <break time=\"2s\"/> world";
+        let matches: Vec<_> = BREAK_REGEX.captures_iter(text).collect();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].get(1).unwrap().as_str(), "2s");
+
+        // Test <break strength="weak"/>
+        let text = "Hello <break strength=\"weak\"/> world";
+        let matches: Vec<_> = BREAK_REGEX.captures_iter(text).collect();
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].get(1).is_none()); // No time attribute
+        assert_eq!(matches[0].get(2).unwrap().as_str(), "weak");
+
+        // Test multiple breaks
+        let text =
+            "A <break time=\"250ms\"/> B <break time=\"1s\"/> C <break strength=\"strong\"/> D";
+        let matches: Vec<_> = BREAK_REGEX.captures_iter(text).collect();
         assert_eq!(matches.len(), 3);
-        assert!(matches[0].get(1).is_none());
-        assert_eq!(matches[1].get(1).unwrap().as_str(), "10");
-        assert_eq!(matches[2].get(1).unwrap().as_str(), "50");
+        assert_eq!(matches[0].get(1).unwrap().as_str(), "250ms");
+        assert_eq!(matches[1].get(1).unwrap().as_str(), "1s");
+        assert_eq!(matches[2].get(2).unwrap().as_str(), "strong");
     }
 
     #[test]
-    fn test_split_text_by_pauses_logic() {
+    fn test_time_to_duration_ms() {
+        // Test milliseconds
+        assert_eq!(time_to_duration_ms("500ms").unwrap(), 500);
+        assert_eq!(time_to_duration_ms("1000ms").unwrap(), 1000);
+        assert_eq!(time_to_duration_ms("250ms").unwrap(), 250);
+
+        // Test seconds
+        assert_eq!(time_to_duration_ms("1s").unwrap(), 1000);
+        assert_eq!(time_to_duration_ms("2s").unwrap(), 2000);
+        assert_eq!(time_to_duration_ms("2.5s").unwrap(), 2500);
+        assert_eq!(time_to_duration_ms("0.5s").unwrap(), 500);
+
+        // Test invalid formats
+        assert!(time_to_duration_ms("invalid").is_err());
+        assert!(time_to_duration_ms("500").is_err()); // Missing unit
+        assert!(time_to_duration_ms("500h").is_err()); // Invalid unit
+        assert!(time_to_duration_ms("abc ms").is_err()); // Invalid value
+    }
+
+    #[test]
+    fn test_strength_to_duration_ms() {
+        assert_eq!(strength_to_duration_ms("x-weak").unwrap(), 100);
+        assert_eq!(strength_to_duration_ms("weak").unwrap(), 250);
+        assert_eq!(strength_to_duration_ms("medium").unwrap(), 500);
+        assert_eq!(strength_to_duration_ms("strong").unwrap(), 1000);
+        assert_eq!(strength_to_duration_ms("x-strong").unwrap(), 2000);
+
+        // Test invalid strength
+        assert!(strength_to_duration_ms("super").is_err());
+        assert!(strength_to_duration_ms("invalid").is_err());
+    }
+
+    #[test]
+    fn test_split_text_by_breaks_logic() {
         // Note: This test doesn't require a full TTSKoko instance
         // We're just testing the regex logic directly
 
-        // Test simple case
-        let text = "Hello <pause> world";
+        // Test simple case with <break/>
+        let text = "Hello <break/> world";
         let mut segments = Vec::new();
         let mut last_end = 0;
 
-        for cap in PAUSE_REGEX.captures_iter(text) {
+        for cap in BREAK_REGEX.captures_iter(text) {
             let match_obj = cap.get(0).unwrap();
             let before = &text[last_end..match_obj.start()];
             segments.push(before);
@@ -520,5 +628,24 @@ mod tests {
         assert_eq!(segments.len(), 2);
         assert_eq!(segments[0], "Hello ");
         assert_eq!(segments[1], " world");
+
+        // Test with time attribute
+        let text = "A <break time=\"1s\"/> B <break time=\"500ms\"/> C";
+        let matches: Vec<_> = BREAK_REGEX.captures_iter(text).collect();
+        assert_eq!(matches.len(), 2);
+
+        // Verify time parsing
+        let time1 = matches[0].get(1).unwrap().as_str();
+        let time2 = matches[1].get(1).unwrap().as_str();
+        assert_eq!(time_to_duration_ms(time1).unwrap(), 1000);
+        assert_eq!(time_to_duration_ms(time2).unwrap(), 500);
+
+        // Test with strength attribute
+        let text = "X <break strength=\"weak\"/> Y";
+        let matches: Vec<_> = BREAK_REGEX.captures_iter(text).collect();
+        assert_eq!(matches.len(), 1);
+
+        let strength = matches[0].get(2).unwrap().as_str();
+        assert_eq!(strength_to_duration_ms(strength).unwrap(), 250);
     }
 }

@@ -196,11 +196,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             Mode::OpenAI { ip, port } => {
-                // Create session pool - default 2 sessions for parallel processing
+                // Create session pool - default 1 session to avoid memory corruption
                 let pool_size: usize = std::env::var("KOKOROS_SESSION_POOL_SIZE")
                     .ok()
                     .and_then(|v| v.parse().ok())
-                    .unwrap_or(2);
+                    .unwrap_or(1);
 
                 info!(
                     "Creating session pool with {} ONNX Runtime sessions",
