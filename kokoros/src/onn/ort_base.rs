@@ -6,7 +6,6 @@ use ort::execution_providers::cpu::CPUExecutionProvider;
 use ort::execution_providers::cuda::CUDAExecutionProvider;
 use ort::session::Session;
 use ort::session::builder::SessionBuilder;
-use std::env;
 
 pub trait OrtBase {
     fn load_model(&mut self, model_path: String) -> Result<(), String> {
@@ -22,35 +21,8 @@ pub trait OrtBase {
         #[cfg(all(not(feature = "cuda"), not(feature = "coreml")))]
         let _providers = [CPUExecutionProvider::default().build()];
 
-        // Read thread configuration from environment variables
-        let intra_threads = env::var("ORT_INTRA_OP_NUM_THREADS")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(0); // 0 means use default
-        let inter_threads = env::var("ORT_INTER_OP_NUM_THREADS")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(0); // 0 means use default
-
-        info!(
-            "Configuring ONNX Runtime with intra_threads={}, inter_threads={}",
-            intra_threads, inter_threads
-        );
-
         match SessionBuilder::new() {
-            Ok(mut builder) => {
-                // Configure thread pools if environment variables are set
-                if intra_threads > 0 {
-                    builder = builder
-                        .with_intra_threads(intra_threads)
-                        .map_err(|e| format!("Failed to set intra threads: {}", e))?;
-                }
-                if inter_threads > 0 {
-                    builder = builder
-                        .with_inter_threads(inter_threads)
-                        .map_err(|e| format!("Failed to set inter threads: {}", e))?;
-                }
-
+            Ok(builder) => {
                 let session = builder
                     .with_execution_providers(_providers)
                     .map_err(|e| format!("Failed to build session: {}", e))?
