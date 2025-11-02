@@ -32,7 +32,9 @@ This directory contains the Kokoros text-to-speech (TTS) engine - a high-quality
 - **High Audio Quality**: Professional-grade audio output
 - **Batch Processing**: Efficient processing of multiple text segments
 - **Streaming Output**: Real-time audio generation for large texts
-- **Configurable Pause Support**: Insert pauses at any position in text using `<pause>` and `<pause:N>` tags
+- **SSML Support**: Industry-standard SSML tags for precise control:
+  - `<break>` tags for configurable pauses and timing
+  - `<emphasis>` tags for dynamic volume and speed adjustments
 
 ### OpenAI-Compatible API (`kokoros-openai/`)
 - **API Compatibility**: OpenAI TTS API-compatible interface
@@ -308,6 +310,173 @@ python3 analyze_pause.py output.wav
 ```
 
 This tool detects silence regions and reports their timing, useful for verifying break behavior and calibrating duration values.
+
+## SSML Emphasis Tag Support
+
+Kokoros TTS supports SSML `<emphasis>` tags for controlling the prominence and intensity of specific words or phrases. This feature enables dynamic volume and speed adjustments to make important content stand out or de-emphasize less critical information.
+
+### SSML Emphasis Tag Syntax
+
+**Basic Emphasis (default level):**
+```xml
+"This is <emphasis>important</emphasis>."
+```
+- Uses default `moderate` level if no level attribute specified
+- Makes text noticeably louder and slightly slower
+
+**Emphasis with Specific Level:**
+```xml
+"This is <emphasis level=\"strong\">very important</emphasis>!"
+"<emphasis level=\"reduced\">Side note:</emphasis> Continue with main content."
+```
+- Specify exact emphasis level with `level` attribute
+- Five predefined levels available (see table below)
+
+**Multiple Emphasis Tags:**
+```xml
+"We need <emphasis level=\"moderate\">better</emphasis> solutions, not <emphasis level=\"strong\">perfect</emphasis> ones."
+```
+- Supports unlimited emphasis tags in a single text
+- Each tag can have its own level
+- Works correctly with multiple tags on the same line
+
+**Combined with Break Tags:**
+```xml
+"Listen carefully<break time=\"1s\"/> <emphasis level=\"x-strong\">This is critical!</emphasis>"
+```
+- Emphasis and break tags work seamlessly together
+- Break provides pause, emphasis provides volume/speed control
+
+### Emphasis Levels
+
+Emphasis levels control both volume (amplitude) and speaking speed to create natural-sounding emphasis:
+
+| Level | Tag Syntax | Volume | Speed | Description |
+|-------|-----------|--------|-------|-------------|
+| **none** | `<emphasis level="none">text</emphasis>` | 1.0x (normal) | 1.0x (normal) | Explicitly set to normal speech |
+| **reduced** | `<emphasis level="reduced">text</emphasis>` | 0.5x (50% quieter) | 1.1x (faster) | De-emphasized, whisper-like, for side notes |
+| **moderate** | `<emphasis level="moderate">text</emphasis>` | 1.3x (30% louder) | 1.0x (normal speed) | **DEFAULT** - Subtle emphasis, volume only |
+| **strong** | `<emphasis level="strong">text</emphasis>` | 2.0x (2× louder) | 0.85x (slower) | Strong emphasis for important content |
+| **x-strong** | `<emphasis level="x-strong">text</emphasis>` | 2.5x (2.5× louder) | 0.78x (much slower) | Maximum emphasis, very dramatic |
+
+### Usage Examples
+
+**Question Emphasis:**
+```xml
+<!-- Normal question -->
+"How are you?"
+
+<!-- Emphasized question -->
+"<emphasis level=\"strong\">How are you?</emphasis>"
+
+<!-- Urgent question -->
+"<emphasis level=\"x-strong\">What have you done?</emphasis>"
+```
+
+**Content Hierarchy:**
+```xml
+"<emphasis level=\"reduced\">Note:</emphasis> The main point is <emphasis level=\"strong\">critical</emphasis>."
+```
+- `reduced` for parenthetical/side information
+- `strong` for key points
+
+**Dramatic Speech:**
+```xml
+"And the winner is<break time=\"2s\"/> <emphasis level=\"x-strong\">John Smith!</emphasis>"
+```
+- Combines pause for suspense with maximum emphasis for impact
+
+**List with Varying Emphasis:**
+```xml
+"<emphasis level=\"moderate\">First</emphasis>, do this. <emphasis level=\"strong\">Second</emphasis>, do that. <emphasis level=\"x-strong\">Third</emphasis>, most important!"
+```
+
+### Implementation Details
+
+**How It Works:**
+1. **Tag Preprocessing**: SSML `<emphasis>` tags converted to internal markers
+2. **Text Segmentation**: Text split into separate segments for each emphasis level
+3. **Parallel Processing**: Each segment synthesized independently with adjusted parameters
+4. **Volume Adjustment**: Audio amplitude multiplied by emphasis volume factor
+5. **Speed Adjustment**: TTS synthesis speed modified by emphasis speed factor
+6. **Audio Concatenation**: Segments merged into final audio output
+
+**Technical Implementation:**
+- File: `kokoros/kokoros/src/tts/koko.rs`
+- Regex Pattern: `<emphasis(?:\s+level="([^"]+)")?\s*>(.*?)</emphasis>`
+- Function: `preprocess_emphasis_tags()` - Converts tags to markers
+- Function: `split_by_emphasis_markers()` - Handles multiple emphasis tags correctly
+- Function: `emphasis_to_audio_params()` - Maps levels to volume/speed multipliers
+- Audio Processing: Amplitude multiplication (volume) + speed parameter adjustment
+
+**Error Handling:**
+- Invalid emphasis levels (e.g., `<emphasis level="invalid">`) → Log error, use `moderate` as default
+- Malformed tags → Ignored, text processed normally
+- Volume clipping → Audio samples clamped to prevent distortion
+
+### API Usage
+
+**OpenAI-Compatible Endpoint:**
+```bash
+curl -X POST http://localhost:3025/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "kokoro",
+    "input": "This is <emphasis level=\"strong\">very important</emphasis>!",
+    "voice": "af_sky",
+    "response_format": "wav"
+  }' --output output.wav
+```
+
+**Request Parameters:**
+- `input`: Text with embedded SSML `<emphasis>` tags
+- `voice`: Voice model to use
+- `speed`: Base speech speed multiplier (emphasis adjustments apply on top of this)
+- `response_format`: Output format (wav, mp3, webm, aac)
+
+### Worker Integration
+
+The SpeakDoc worker service can include SSML emphasis tags in text sent to Kokoros:
+
+```python
+# In worker text processing
+processed_text = "Introduction. <emphasis level=\"strong\">Key point here.</emphasis> Continue."
+audio = kokoros_api.generate_speech(processed_text, voice="af_sky")
+```
+
+### Testing
+
+Unit tests verify SSML emphasis tag functionality:
+
+```bash
+cd kokoros/kokoros
+cargo test koko::tests
+```
+
+**Tests Included:**
+- `test_emphasis_tag_regex` - Validates SSML emphasis tag pattern matching
+- `test_parse_emphasis_level` - Validates emphasis level string parsing
+- `test_emphasis_to_audio_params` - Validates volume/speed parameter mapping
+- `test_extract_emphasis_from_text` - Validates emphasis marker extraction
+
+### Use Cases
+
+- **Questions**: Add urgency or emphasis to questions
+- **Warnings**: Make critical warnings stand out
+- **Hierarchical Content**: De-emphasize side notes, emphasize main points
+- **Dramatic Effect**: Create suspense or impact with x-strong emphasis
+- **Accessibility**: Help listeners identify important content
+- **Natural Pacing**: Vary speech dynamics for more engaging audio
+
+### Benefits
+
+- ✅ **SSML Standard**: Uses industry-standard SSML syntax for broad compatibility
+- ✅ **Dynamic Volume**: Precise control over audio amplitude (0.5x to 2.5x)
+- ✅ **Speed Variation**: Coordinated speed changes for natural emphasis
+- ✅ **Multiple Tags**: Correctly handles unlimited emphasis tags per text
+- ✅ **Easy Integration**: Standard SSML tags, no proprietary syntax
+- ✅ **Combines with Breaks**: Works seamlessly with `<break>` tags
+- ✅ **Natural Sound**: Volume + speed adjustments mimic human emphasis patterns
 
 ## API Integration with SpeakDoc
 

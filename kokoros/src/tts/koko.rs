@@ -18,18 +18,65 @@ use espeak_rs::text_to_phonemes;
 lazy_static! {
     static ref BREAK_REGEX: Regex =
         Regex::new(r#"<break(?:\s+(?:time="([^"]+)"|strength="([^"]+)"))*\s*/>"#).unwrap();
+
+    // Compile the SSML emphasis tag regex only once at startup
+    // Matches: <emphasis level="strong">text</emphasis>, <emphasis>text</emphasis>
+    static ref EMPHASIS_REGEX: Regex =
+        Regex::new(r#"<emphasis(?:\s+level="([^"]+)")?\s*>(.*?)</emphasis>"#).unwrap();
 }
 
-/// Represents a text segment with an optional break duration (in milliseconds) to prepend
+/// Represents emphasis level for a text segment
+#[derive(Debug, Clone)]
+enum EmphasisLevel {
+    None,
+    Reduced,  // Less emphasis than normal
+    Moderate, // Default emphasis level
+    Strong,   // More emphasis than normal
+    XStrong,  // Maximum emphasis
+}
+
+/// Represents a text segment with optional break duration and emphasis settings
 #[derive(Debug, Clone)]
 struct TextSegment {
     text: String,
     pause_duration_ms: Option<usize>, // Break duration in milliseconds (from SSML <break> tag)
+    emphasis: EmphasisLevel,          // Emphasis level (from SSML <emphasis> tag)
 }
 
 /// Default break duration when <break/> tag is used without explicit duration
 /// Value is in milliseconds: 500ms = 0.5 seconds
 const DEFAULT_BREAK_DURATION_MS: usize = 500;
+
+/// Convert emphasis level string to EmphasisLevel enum
+fn parse_emphasis_level(level: &str) -> EmphasisLevel {
+    match level {
+        "none" => EmphasisLevel::None,
+        "reduced" => EmphasisLevel::Reduced,
+        "moderate" => EmphasisLevel::Moderate,
+        "strong" => EmphasisLevel::Strong,
+        "x-strong" => EmphasisLevel::XStrong,
+        _ => {
+            error!(
+                "Invalid emphasis level '{}', using 'moderate' as default",
+                level
+            );
+            EmphasisLevel::Moderate
+        }
+    }
+}
+
+/// Map emphasis level to (volume_multiplier, speed_multiplier)
+/// Volume: amplitude multiplier for louder/softer audio
+/// Speed: rate multiplier for faster/slower speech
+fn emphasis_to_audio_params(emphasis: &EmphasisLevel) -> (f32, f32) {
+    match emphasis {
+        EmphasisLevel::None => (1.0, 1.0), // Normal volume, normal speed
+        EmphasisLevel::Reduced => (0.5, 1.1), // Much quieter (50%), faster
+        EmphasisLevel::Moderate => (1.3, 1.0), // Moderately louder (30% increase), normal speed
+        EmphasisLevel::Strong => (2.0, 0.85), // Much louder (2x), noticeably slower
+        EmphasisLevel::XStrong => (2.5, 0.78), // Very loud (2.5x), much slower
+    }
+}
 
 /// Parse SSML break strength attribute to millisecond duration
 fn strength_to_duration_ms(strength: &str) -> Result<usize, String> {
@@ -77,8 +124,7 @@ pub struct TTSOpts<'a> {
 
 #[derive(Clone)]
 pub struct TTSKoko {
-    #[allow(dead_code)]
-    model_path: String,
+    _model_path: String, // Stored for potential debugging, prefixed with _ to indicate intentionally unused
     model: Arc<Mutex<ort_koko::OrtKoko>>,
     styles: HashMap<String, Vec<[[f32; 256]; 1]>>,
     init_config: InitConfig,
@@ -129,21 +175,128 @@ impl TTSKoko {
         let styles = Self::load_voices(voices_path);
 
         TTSKoko {
-            model_path: model_path.to_string(),
+            _model_path: model_path.to_string(),
             model,
             styles,
             init_config: cfg,
         }
     }
 
+    /// Split text by emphasis markers into multiple segments
+    ///
+    /// Handles multiple emphasis markers in a single text string
+    /// Returns Vec of (clean_text, emphasis_level) tuples
+    ///
+    /// Example:
+    /// Input: "Normal \x01strong\x02emphasized\x03 more \x01moderate\x02text\x03 end"
+    /// Output: [("Normal ", None), ("emphasized", Strong), (" more ", None), ("text", Moderate), (" end", None)]
+    fn split_by_emphasis_markers(text: &str) -> Vec<(String, EmphasisLevel)> {
+        let mut result = Vec::new();
+        let mut current_pos = 0;
+
+        while current_pos < text.len() {
+            // Look for next emphasis marker
+            if let Some(start_idx) = text[current_pos..].find('\x01') {
+                let absolute_start = current_pos + start_idx;
+
+                // Add any text before the marker as non-emphasized
+                if start_idx > 0 {
+                    let before_text = text[current_pos..absolute_start].to_string();
+                    if !before_text.is_empty() {
+                        result.push((before_text, EmphasisLevel::None));
+                    }
+                }
+
+                // Find the middle and end markers
+                if let Some(mid_offset) = text[absolute_start..].find('\x02') {
+                    let absolute_mid = absolute_start + mid_offset;
+                    if let Some(end_offset) = text[absolute_mid..].find('\x03') {
+                        let absolute_end = absolute_mid + end_offset;
+
+                        // Extract level and emphasized text
+                        let level_str = &text[absolute_start + 1..absolute_mid];
+                        let emphasized_text = text[absolute_mid + 1..absolute_end].to_string();
+                        let emphasis = parse_emphasis_level(level_str);
+
+                        if !emphasized_text.is_empty() {
+                            result.push((emphasized_text, emphasis));
+                        }
+
+                        // Move past this emphasis block
+                        current_pos = absolute_end + 1;
+                        continue;
+                    }
+                }
+
+                // If we couldn't find proper markers, treat rest as normal text
+                break;
+            } else {
+                // No more emphasis markers, add remaining text
+                break;
+            }
+        }
+
+        // Add any remaining text as non-emphasized
+        if current_pos < text.len() {
+            let remaining = text[current_pos..].to_string();
+            if !remaining.is_empty() {
+                result.push((remaining, EmphasisLevel::None));
+            }
+        }
+
+        // If no emphasis markers were found at all, return the whole text
+        if result.is_empty() && !text.is_empty() {
+            result.push((text.to_string(), EmphasisLevel::None));
+        }
+
+        result
+    }
+
+    /// Process SSML <emphasis> tags in text and return text with emphasis markers
+    ///
+    /// Emphasis tags are replaced with special markers that will be processed later
+    /// Format: \x01LEVEL\x02text\x03 where LEVEL is one of: none, reduced, moderate, strong, x-strong
+    ///
+    /// Examples:
+    /// - "<emphasis level=\"strong\">important</emphasis>" -> "\x01strong\x02important\x03"
+    /// - "<emphasis>text</emphasis>" -> "\x01moderate\x02text\x03" // default level
+    fn preprocess_emphasis_tags(&self, text: &str) -> String {
+        let mut result = String::new();
+        let mut last_end = 0;
+
+        for cap in EMPHASIS_REGEX.captures_iter(text) {
+            let match_obj = cap.get(0).unwrap();
+
+            // Add text before this emphasis tag
+            result.push_str(&text[last_end..match_obj.start()]);
+
+            // Get emphasis level (default to "moderate" if not specified)
+            let level = cap.get(1).map(|m| m.as_str()).unwrap_or("moderate");
+            let emphasized_text = cap.get(2).unwrap().as_str();
+
+            // Insert markers: \x01level\x02text\x03
+            result.push('\x01');
+            result.push_str(level);
+            result.push('\x02');
+            result.push_str(emphasized_text);
+            result.push('\x03');
+
+            last_end = match_obj.end();
+        }
+
+        // Add remaining text
+        result.push_str(&text[last_end..]);
+        result
+    }
+
     /// Splits text by SSML <break> tags into segments with break duration information
+    /// Also extracts emphasis markers inserted by preprocess_emphasis_tags
     ///
     /// The break tag applies to the text segment that comes AFTER it.
     ///
     /// Examples:
-    /// - "Hello <break/> world" -> [("Hello", None), ("world", Some(500))]  // 500ms default
-    /// - "A <break time=\"1s\"/> B <break time=\"2s\"/> C" -> [("A", None), ("B", Some(1000)), ("C", Some(2000))]
-    /// - "X <break strength=\"weak\"/> Y" -> [("X", None), ("Y", Some(250))]  // weak = 250ms
+    /// - "Hello <break/> world" -> [("Hello", None, None), ("world", Some(500), None)]
+    /// - "\x01strong\x02important\x03" -> [("important", None, Strong)]
     fn split_text_by_pauses(&self, text: &str) -> Vec<TextSegment> {
         let mut segments = Vec::new();
         let mut last_end = 0;
@@ -158,11 +311,19 @@ impl TTSKoko {
             let text_segment = &text[last_end..match_start];
 
             // Add the text segment with any pending pause from the previous tag
+            // Split by emphasis markers first (handles multiple emphasis tags)
             if !text_segment.trim().is_empty() {
-                segments.push(TextSegment {
-                    text: text_segment.to_string(),
-                    pause_duration_ms: pending_pause,
-                });
+                let emphasis_segments = Self::split_by_emphasis_markers(text_segment);
+                for (idx, (clean_text, emphasis)) in emphasis_segments.into_iter().enumerate() {
+                    if !clean_text.trim().is_empty() {
+                        segments.push(TextSegment {
+                            text: clean_text,
+                            pause_duration_ms: if idx == 0 { pending_pause } else { None },
+                            emphasis,
+                        });
+                    }
+                }
+                // Pause has been consumed by first emphasis segment
             }
 
             // Parse break duration from time or strength attributes
@@ -206,19 +367,31 @@ impl TTSKoko {
         if last_end < text.len() {
             let remaining_text = &text[last_end..];
             if !remaining_text.trim().is_empty() {
-                segments.push(TextSegment {
-                    text: remaining_text.to_string(),
-                    pause_duration_ms: pending_pause,
-                });
+                let emphasis_segments = Self::split_by_emphasis_markers(remaining_text);
+                for (idx, (clean_text, emphasis)) in emphasis_segments.into_iter().enumerate() {
+                    if !clean_text.trim().is_empty() {
+                        segments.push(TextSegment {
+                            text: clean_text,
+                            pause_duration_ms: if idx == 0 { pending_pause } else { None },
+                            emphasis,
+                        });
+                    }
+                }
             }
         }
 
         // If no break tags were found, return the entire text as a single segment
         if segments.is_empty() && !text.trim().is_empty() {
-            segments.push(TextSegment {
-                text: text.to_string(),
-                pause_duration_ms: None,
-            });
+            let emphasis_segments = Self::split_by_emphasis_markers(text);
+            for (clean_text, emphasis) in emphasis_segments {
+                if !clean_text.trim().is_empty() {
+                    segments.push(TextSegment {
+                        text: clean_text,
+                        pause_duration_ms: None,
+                        emphasis,
+                    });
+                }
+            }
         }
 
         debug!("Split text into {} segments with breaks", segments.len());
@@ -321,18 +494,25 @@ impl TTSKoko {
         speed: f32,
         initial_silence: Option<usize>,
     ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-        // First, split text by SSML break tags
-        let segments = self.split_text_by_pauses(txt);
+        // First, preprocess emphasis tags (replace with markers)
+        let txt_with_markers = self.preprocess_emphasis_tags(txt);
+
+        // Then split text by SSML break tags (which also extracts emphasis markers)
+        let segments = self.split_text_by_pauses(&txt_with_markers);
         let mut final_audio = Vec::new();
 
         for (segment_idx, segment) in segments.iter().enumerate() {
             debug!(
-                "Processing segment {}/{}: pause_duration_ms={:?}, text_len={}",
+                "Processing segment {}/{}: pause_duration_ms={:?}, emphasis={:?}, text_len={}",
                 segment_idx + 1,
                 segments.len(),
                 segment.pause_duration_ms,
+                segment.emphasis,
                 segment.text.len()
             );
+
+            // Get emphasis audio parameters (volume, speed adjustments)
+            let (volume_multiplier, speed_multiplier) = emphasis_to_audio_params(&segment.emphasis);
 
             // Determine the silence duration for this segment
             // First segment uses the passed-in initial_silence
@@ -385,14 +565,26 @@ impl TTSKoko {
 
                 let tokens = vec![padded_tokens];
 
+                // Apply emphasis speed adjustment to the base speed
+                let adjusted_speed = speed * speed_multiplier;
+
                 match self
                     .model
                     .lock()
                     .unwrap()
-                    .infer(tokens, styles.clone(), speed)
+                    .infer(tokens, styles.clone(), adjusted_speed)
                 {
                     Ok(chunk_audio) => {
-                        let chunk_audio: Vec<f32> = chunk_audio.iter().cloned().collect();
+                        let mut chunk_audio: Vec<f32> = chunk_audio.iter().cloned().collect();
+
+                        // Apply emphasis volume adjustment (amplitude multiplication)
+                        if (volume_multiplier - 1.0).abs() > 0.01 {
+                            // Only apply if volume multiplier is not ~1.0
+                            for sample in chunk_audio.iter_mut() {
+                                *sample *= volume_multiplier;
+                            }
+                        }
+
                         final_audio.extend_from_slice(&chunk_audio);
                     }
                     Err(e) => {
@@ -647,5 +839,81 @@ mod tests {
 
         let strength = matches[0].get(2).unwrap().as_str();
         assert_eq!(strength_to_duration_ms(strength).unwrap(), 250);
+    }
+
+    #[test]
+    fn test_emphasis_tag_regex() {
+        // Test <emphasis level="strong">text</emphasis>
+        let text = "This is <emphasis level=\"strong\">very important</emphasis>.";
+        let matches: Vec<_> = EMPHASIS_REGEX.captures_iter(text).collect();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].get(1).unwrap().as_str(), "strong");
+        assert_eq!(matches[0].get(2).unwrap().as_str(), "very important");
+
+        // Test <emphasis>text</emphasis> (no level attribute)
+        let text = "This is <emphasis>important</emphasis>.";
+        let matches: Vec<_> = EMPHASIS_REGEX.captures_iter(text).collect();
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].get(1).is_none()); // No level attribute
+        assert_eq!(matches[0].get(2).unwrap().as_str(), "important");
+
+        // Test multiple emphasis tags
+        let text = "<emphasis level=\"moderate\">First</emphasis> and <emphasis level=\"strong\">second</emphasis>";
+        let matches: Vec<_> = EMPHASIS_REGEX.captures_iter(text).collect();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].get(1).unwrap().as_str(), "moderate");
+        assert_eq!(matches[0].get(2).unwrap().as_str(), "First");
+        assert_eq!(matches[1].get(1).unwrap().as_str(), "strong");
+        assert_eq!(matches[1].get(2).unwrap().as_str(), "second");
+    }
+
+    #[test]
+    fn test_parse_emphasis_level() {
+        assert!(matches!(parse_emphasis_level("none"), EmphasisLevel::None));
+        assert!(matches!(
+            parse_emphasis_level("reduced"),
+            EmphasisLevel::Reduced
+        ));
+        assert!(matches!(
+            parse_emphasis_level("moderate"),
+            EmphasisLevel::Moderate
+        ));
+        assert!(matches!(
+            parse_emphasis_level("strong"),
+            EmphasisLevel::Strong
+        ));
+        assert!(matches!(
+            parse_emphasis_level("x-strong"),
+            EmphasisLevel::XStrong
+        ));
+
+        // Invalid level should default to moderate
+        assert!(matches!(
+            parse_emphasis_level("invalid"),
+            EmphasisLevel::Moderate
+        ));
+    }
+
+    #[test]
+    fn test_emphasis_to_audio_params() {
+        // None: normal volume and speed
+        let (vol, speed) = emphasis_to_audio_params(&EmphasisLevel::None);
+        assert_eq!(vol, 1.0);
+        assert_eq!(speed, 1.0);
+
+        // Reduced: quieter and faster
+        let (vol, speed) = emphasis_to_audio_params(&EmphasisLevel::Reduced);
+        assert!(vol < 1.0);
+        assert!(speed > 1.0);
+
+        // Strong: louder and slower
+        let (vol, speed) = emphasis_to_audio_params(&EmphasisLevel::Strong);
+        assert!(vol > 1.0);
+        assert!(speed < 1.0);
+
+        // XStrong: very loud and much slower
+        let (vol, speed) = emphasis_to_audio_params(&EmphasisLevel::XStrong);
+        assert!(vol > 1.4);
+        assert!(speed < 0.9);
     }
 }
