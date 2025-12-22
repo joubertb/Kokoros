@@ -23,6 +23,13 @@ lazy_static! {
     // Matches: <emphasis level="strong">text</emphasis>, <emphasis>text</emphasis>
     static ref EMPHASIS_REGEX: Regex =
         Regex::new(r#"<emphasis(?:\s+level="([^"]+)")?\s*>(.*?)</emphasis>"#).unwrap();
+
+    // Mutex to serialize access to espeak-ng
+    // espeak-ng uses global state and is NOT thread-safe. Concurrent calls to
+    // espeak_SetVoiceByName can corrupt the internal voices_list, eventually
+    // hitting the N_VOICES_LIST=350 limit and causing heap corruption.
+    // See: https://github.com/espeak-ng/espeak-ng/issues/495
+    static ref ESPEAK_MUTEX: Mutex<()> = Mutex::new(());
 }
 
 /// Represents emphasis level for a text segment
@@ -109,6 +116,19 @@ fn time_to_duration_ms(time_str: &str) -> Result<usize, String> {
             time_str
         ))
     }
+}
+
+/// Thread-safe wrapper for text_to_phonemes.
+/// Acquires ESPEAK_MUTEX before calling espeak-ng to prevent concurrent access
+/// which would corrupt espeak-ng's global voices_list.
+fn safe_text_to_phonemes(
+    text: &str,
+    language: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let _guard = ESPEAK_MUTEX.lock().unwrap();
+    text_to_phonemes(text, language, None, true, false)
+        .map(|v| v.join(""))
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
 }
 
 #[derive(Debug, Clone)]
@@ -423,9 +443,7 @@ impl TTSKoko {
             let sentence = format!("{}.", sentence.trim());
 
             // Convert to phonemes to check token count
-            let sentence_phonemes = text_to_phonemes(&sentence, "en", None, true, false)
-                .unwrap_or_default()
-                .join("");
+            let sentence_phonemes = safe_text_to_phonemes(&sentence, "en").unwrap_or_default();
             let token_count = tokenize(&sentence_phonemes).len();
 
             if token_count > max_tokens {
@@ -440,9 +458,8 @@ impl TTSKoko {
                         format!("{} {}", word_chunk, word)
                     };
 
-                    let test_phonemes = text_to_phonemes(&test_chunk, "en", None, true, false)
-                        .unwrap_or_default()
-                        .join("");
+                    let test_phonemes =
+                        safe_text_to_phonemes(&test_chunk, "en").unwrap_or_default();
                     let test_tokens = tokenize(&test_phonemes).len();
 
                     if test_tokens > max_tokens {
@@ -461,9 +478,7 @@ impl TTSKoko {
             } else if !current_chunk.is_empty() {
                 // Try to append to current chunk
                 let test_text = format!("{} {}", current_chunk, sentence);
-                let test_phonemes = text_to_phonemes(&test_text, "en", None, true, false)
-                    .unwrap_or_default()
-                    .join("");
+                let test_phonemes = safe_text_to_phonemes(&test_text, "en").unwrap_or_default();
                 let test_tokens = tokenize(&test_phonemes).len();
 
                 if test_tokens > max_tokens {
@@ -546,10 +561,9 @@ impl TTSKoko {
             let chunks = self.split_text_into_chunks(&segment.text, max_chunk_tokens.max(100)); // Minimum 100 tokens
 
             for chunk in chunks.iter() {
-                // Convert chunk to phonemes
-                let phonemes = text_to_phonemes(chunk, lan, None, true, false)
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
-                    .join("");
+                // Convert chunk to phonemes (using thread-safe wrapper)
+                let phonemes = safe_text_to_phonemes(chunk, lan)
+                    .map_err(|e| e as Box<dyn std::error::Error>)?;
                 debug!("phonemes: {}", phonemes);
                 let tokens = tokenize(&phonemes);
 
