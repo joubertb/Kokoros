@@ -481,7 +481,7 @@ cargo test koko::tests
 ## API Integration with SpeakDoc
 
 ### Worker Service Integration
-1. **TTS Request**: Worker sends text and voice parameters to Kokoros
+1. **TTS Request**: Worker sends text and voice parameters to Kokoros. SpeakDoc always sends `speed=1.0`; playback speed is controlled browser-side via `playbackRate`. SSML `<emphasis>` tags still vary speed per-segment for natural emphasis.
 2. **Voice Selection**: Specify desired voice model and characteristics
 3. **Audio Generation**: Kokoros processes text and generates audio
 4. **Response Delivery**: High-quality audio returned to worker
