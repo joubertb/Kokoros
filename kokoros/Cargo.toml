@@ -27,3 +27,5 @@ default = ["cpu"]
 cpu = []
 cuda = ["ort/cuda"]
 coreml = ["ort/coreml"]
+# Dynamic loading of ORT .so at runtime (used in Docker builds for GPU support)
+ort-dynamic = ["ort/load-dynamic"]

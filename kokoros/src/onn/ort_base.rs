@@ -10,7 +10,10 @@ use ort::session::builder::SessionBuilder;
 pub trait OrtBase {
     fn load_model(&mut self, model_path: String) -> Result<(), String> {
         #[cfg(feature = "cuda")]
-        let _providers = [CUDAExecutionProvider::default().build()];
+        let _providers = [
+            CUDAExecutionProvider::default().build(),
+            CPUExecutionProvider::default().build(),
+        ];
 
         #[cfg(feature = "coreml")]
         let _providers = [
@@ -47,7 +50,7 @@ pub trait OrtBase {
             }
 
             #[cfg(feature = "cuda")]
-            info!("Configured with: CUDA execution provider");
+            info!("Configured with: CUDA execution provider (CPU fallback enabled)");
 
             #[cfg(feature = "coreml")]
             info!("Configured with: CoreML execution provider");

@@ -602,8 +602,21 @@ impl TTSKoko {
                         final_audio.extend_from_slice(&chunk_audio);
                     }
                     Err(e) => {
-                        error!("Error processing chunk: {:?}", e);
+                        let err_msg = format!("{:?}", e);
+                        error!("Error processing chunk: {}", err_msg);
                         error!("Chunk text was: {:?}", chunk);
+
+                        // If GPU/CUDA error, exit process so Docker restarts us
+                        // On restart, ONNX Runtime will fall back to CPU if GPU is unavailable
+                        let err_lower = err_msg.to_lowercase();
+                        if err_lower.contains("cuda")
+                            || err_lower.contains("gpu")
+                            || err_lower.contains("device")
+                        {
+                            error!("GPU error detected, exiting process for restart with CPU fallback");
+                            std::process::exit(1);
+                        }
+
                         return Err(Box::new(std::io::Error::other(format!(
                             "Chunk processing failed: {:?}",
                             e
