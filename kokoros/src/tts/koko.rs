@@ -613,7 +613,9 @@ impl TTSKoko {
                             || err_lower.contains("gpu")
                             || err_lower.contains("device")
                         {
-                            error!("GPU error detected, exiting process for restart with CPU fallback");
+                            error!(
+                                "GPU error detected, exiting process for restart with CPU fallback"
+                            );
                             std::process::exit(1);
                         }
 
