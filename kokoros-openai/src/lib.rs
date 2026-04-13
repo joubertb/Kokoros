@@ -76,12 +76,32 @@ struct SpeechRequest {
     initial_silence: Option<usize>,
 }
 
+/// Request for the /v1/audio/pcm endpoint.
+/// Same as SpeechRequest but without response_format (always returns raw PCM).
+#[derive(Deserialize)]
+struct PcmRequest {
+    #[allow(dead_code)]
+    model: String,
+
+    input: String,
+
+    #[serde(default)]
+    voice: Voice,
+
+    #[serde(default)]
+    speed: Speed,
+
+    #[serde(default)]
+    initial_silence: Option<usize>,
+}
+
 pub async fn create_server(tts: TTSKoko) -> Router {
     debug!("create_server()");
 
     Router::new()
         .route("/", get(handle_home))
         .route("/v1/audio/speech", post(handle_tts))
+        .route("/v1/audio/pcm", post(handle_pcm))
         .layer(CorsLayer::permissive())
         .with_state(tts)
 }
@@ -176,5 +196,46 @@ async fn handle_tts(
     Response::builder()
         .header(header::CONTENT_TYPE, content_type)
         .body(audio_data.into())
+        .map_err(|e| SpeechError::Mp3Conversion(std::io::Error::other(e)))
+}
+
+/// Returns raw PCM f32le audio data with metadata in response headers.
+/// This avoids encoding overhead — the caller (worker) encodes to the
+/// final format(s) it needs using PyAV.
+async fn handle_pcm(
+    State(tts): State<TTSKoko>,
+    Json(PcmRequest {
+        model: _,
+        input,
+        voice: Voice(voice),
+        speed: Speed(speed),
+        initial_silence,
+    }): Json<PcmRequest>,
+) -> Result<Response, SpeechError> {
+    debug!(
+        "Processing PCM request for voice: {}, speed: {}, text length: {}",
+        voice,
+        speed,
+        input.len()
+    );
+
+    let raw_audio = tts
+        .tts_raw_audio(&input, "en-us", &voice, speed, initial_silence)
+        .map_err(SpeechError::Koko)?;
+
+    let sample_rate = TTSKokoInitConfig::default().sample_rate;
+
+    // Convert f32 samples to little-endian bytes
+    let mut pcm_bytes = Vec::with_capacity(raw_audio.len() * 4);
+    for sample in &raw_audio {
+        pcm_bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header("X-Sample-Rate", sample_rate.to_string())
+        .header("X-Sample-Format", "f32le")
+        .header("X-Channels", "1")
+        .body(pcm_bytes.into())
         .map_err(|e| SpeechError::Mp3Conversion(std::io::Error::other(e)))
 }

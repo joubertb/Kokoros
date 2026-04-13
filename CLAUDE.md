@@ -44,6 +44,7 @@ This directory contains the Kokoros text-to-speech (TTS) engine - a high-quality
 
 #### API Endpoints
 - **POST /v1/audio/speech**: Generate speech from text (OpenAI compatible)
+- **POST /v1/audio/pcm**: Return raw f32le PCM audio with metadata headers (`X-Sample-Rate`, `X-Sample-Format`, `X-Channels`). Used by workers to avoid double-encoding — workers encode PCM to target formats using PyAV.
 - **GET /health**: Service health check endpoint with detailed status information
 - **GET /**: Simple health check returning "OK"
 
