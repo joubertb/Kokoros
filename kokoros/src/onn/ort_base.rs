@@ -7,37 +7,75 @@ use ort::execution_providers::cuda::CUDAExecutionProvider;
 use ort::session::Session;
 use ort::session::builder::SessionBuilder;
 
+/// Check if NVIDIA CUDA is available by looking for the driver library.
+/// This prevents a native crash when CUDA EP tries to initialize without drivers.
+#[cfg(feature = "cuda")]
+fn is_cuda_available() -> bool {
+    use std::path::Path;
+
+    // Check for nvidia-smi (most reliable indicator of working drivers)
+    if let Ok(output) = std::process::Command::new("nvidia-smi")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        if output.success() {
+            return true;
+        }
+    }
+
+    // Fallback: check for libcuda.so in standard paths
+    let cuda_lib_paths = [
+        "/usr/lib/x86_64-linux-gnu/libcuda.so",
+        "/usr/lib/x86_64-linux-gnu/libcuda.so.1",
+        "/usr/local/cuda/lib64/libcuda.so",
+        "/usr/lib/libcuda.so",
+    ];
+    for path in &cuda_lib_paths {
+        if Path::new(path).exists() {
+            return true;
+        }
+    }
+
+    false
+}
+
 pub trait OrtBase {
     fn load_model(&mut self, model_path: String) -> Result<(), String> {
         #[cfg(feature = "cuda")]
         {
-            let cuda_providers = [
-                CUDAExecutionProvider::default().build(),
-                CPUExecutionProvider::default().build(),
-            ];
-            match SessionBuilder::new() {
-                Ok(builder) => {
-                    match builder
-                        .with_execution_providers(cuda_providers)
-                        .map_err(|e| format!("Failed to build session: {}", e))?
-                        .commit_from_file(&model_path)
-                    {
-                        Ok(session) => {
-                            info!("Model loaded with CUDA execution provider");
-                            self.set_sess(session);
-                            return Ok(());
-                        }
-                        Err(e) => {
-                            warn!("CUDA model loading failed, falling back to CPU: {}", e);
+            if is_cuda_available() {
+                info!("NVIDIA CUDA drivers detected, attempting GPU acceleration");
+                let cuda_providers = [
+                    CUDAExecutionProvider::default().build(),
+                    CPUExecutionProvider::default().build(),
+                ];
+                match SessionBuilder::new() {
+                    Ok(builder) => {
+                        match builder
+                            .with_execution_providers(cuda_providers)
+                            .map_err(|e| format!("Failed to build session: {}", e))?
+                            .commit_from_file(&model_path)
+                        {
+                            Ok(session) => {
+                                info!("Model loaded with CUDA execution provider");
+                                self.set_sess(session);
+                                return Ok(());
+                            }
+                            Err(e) => {
+                                warn!("CUDA model loading failed, falling back to CPU: {}", e);
+                            }
                         }
                     }
+                    Err(e) => {
+                        warn!(
+                            "Session builder failed with CUDA, falling back to CPU: {}",
+                            e
+                        );
+                    }
                 }
-                Err(e) => {
-                    warn!(
-                        "Session builder failed with CUDA, falling back to CPU: {}",
-                        e
-                    );
-                }
+            } else {
+                info!("No NVIDIA CUDA drivers detected, using CPU execution provider");
             }
         }
 
