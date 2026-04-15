@@ -95,6 +95,9 @@ pub trait OrtBase {
                     .map_err(|e| format!("Failed to build session: {}", e))?
                     .commit_from_file(model_path)
                     .map_err(|e| format!("Failed to commit from file: {}", e))?;
+                #[cfg(feature = "coreml")]
+                info!("Model loaded with CoreML execution provider (CPU fallback)");
+                #[cfg(not(feature = "coreml"))]
                 info!("Model loaded with CPU execution provider");
                 self.set_sess(session);
                 Ok(())
