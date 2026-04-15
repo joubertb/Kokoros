@@ -74,6 +74,15 @@ This directory contains the Kokoros text-to-speech (TTS) engine - a high-quality
 - **Configuration Files**: Voice model configuration and parameter settings
 - **Reference Audio**: Sample audio files for voice quality verification
 
+## macOS Development
+
+Auto-started by `start.speakdoc development run` as a host process.
+To build: `start.speakdoc development build --kokoros` (runs `cargo build --release`).
+To skip auto-start: `start.speakdoc development run --no-kokoros-autostart`.
+To start manually: `cd Kokoros && cargo run --release --bin koko -- openai --port 3025`.
+Logs to `kokoros.log` in Kokoros directory.
+ONNX model loading takes ~120s on first start.
+
 ## Docker and Deployment
 
 ### Container Configuration (`Dockerfile`)
