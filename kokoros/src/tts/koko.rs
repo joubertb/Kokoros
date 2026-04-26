@@ -6,10 +6,10 @@ use log::{debug, error, info};
 use ndarray::Array3;
 use ndarray_npy::NpzReader;
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use espeak_rs::text_to_phonemes;
 
@@ -23,6 +23,14 @@ lazy_static! {
     // Matches: <emphasis level="strong">text</emphasis>, <emphasis>text</emphasis>
     static ref EMPHASIS_REGEX: Regex =
         Regex::new(r#"<emphasis(?:\s+level="([^"]+)")?\s*>(.*?)</emphasis>"#).unwrap();
+
+    // <phoneme alphabet="ipa" ph="…">word</phoneme>. The `ph` attribute holds
+    // raw IPA that bypasses espeak's G2P; the wrapped word is for readability
+    // only. Order-independent: group 1 = ph when alphabet first, group 2 = ph
+    // when ph first.
+    static ref PHONEME_OVERRIDE_REGEX: Regex = Regex::new(
+        r#"<phoneme\s+(?:alphabet="ipa"\s+ph="([^"]+)"|ph="([^"]+)"\s+alphabet="ipa")\s*>[^<]*</phoneme>"#
+    ).unwrap();
 
     // Mutex to serialize access to espeak-ng
     // espeak-ng uses global state and is NOT thread-safe. Concurrent calls to
@@ -118,17 +126,112 @@ fn time_to_duration_ms(time_str: &str) -> Result<usize, String> {
     }
 }
 
-/// Thread-safe wrapper for text_to_phonemes.
-/// Acquires ESPEAK_MUTEX before calling espeak-ng to prevent concurrent access
-/// which would corrupt espeak-ng's global voices_list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PhonemeSegment {
+    Text(String),
+    Override(String),
+}
+
+/// Split `text` into alternating plain-text and phoneme-override segments.
+///
+/// Recognizes `<phoneme alphabet="ipa" ph="…">word</phoneme>` tags in either
+/// attribute order. Other alphabets fall through as plain text (regex won't
+/// match), preserving them for downstream handling. The wrapped word inside
+/// the tag is discarded — the `ph` value replaces it in the phoneme stream.
+fn split_phoneme_overrides(text: &str) -> Vec<PhonemeSegment> {
+    if !text.contains("<phoneme") {
+        return vec![PhonemeSegment::Text(text.to_string())];
+    }
+    let mut out = Vec::new();
+    let mut last_end = 0;
+    for caps in PHONEME_OVERRIDE_REGEX.captures_iter(text) {
+        let whole = caps.get(0).unwrap();
+        // Regex guarantees one of the two ph groups matches.
+        let ph = caps.get(1).or_else(|| caps.get(2)).unwrap().as_str();
+        if whole.start() > last_end {
+            out.push(PhonemeSegment::Text(
+                text[last_end..whole.start()].to_string(),
+            ));
+        }
+        out.push(PhonemeSegment::Override(ph.to_string()));
+        last_end = whole.end();
+    }
+    if last_end < text.len() {
+        out.push(PhonemeSegment::Text(text[last_end..].to_string()));
+    }
+    out
+}
+
+/// Split `text` on sentence-ending punctuation (`.`, `?`, `!`, `;`), skipping
+/// any punctuation that falls inside a `<phoneme>` tag. Empty/whitespace-only
+/// fragments are filtered. IPA values legally contain `.` as syllable
+/// boundaries, so a naive `str::split(['.','?','!',';'])` corrupts tag spans.
+fn split_sentences_outside_phoneme_tags(text: &str) -> Vec<String> {
+    let tag_spans: Vec<(usize, usize)> = if text.contains("<phoneme") {
+        PHONEME_OVERRIDE_REGEX
+            .find_iter(text)
+            .map(|m| (m.start(), m.end()))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let in_tag = |pos: usize| tag_spans.iter().any(|(s, e)| pos >= *s && pos < *e);
+
+    let mut sentences = Vec::new();
+    let mut current = String::new();
+    let mut byte_pos = 0;
+    for ch in text.chars() {
+        if matches!(ch, '.' | '?' | '!' | ';') && !in_tag(byte_pos) {
+            let trimmed = current.trim();
+            if !trimmed.is_empty() {
+                sentences.push(trimmed.to_string());
+            }
+            current.clear();
+        } else {
+            current.push(ch);
+        }
+        byte_pos += ch.len_utf8();
+    }
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        sentences.push(trimmed.to_string());
+    }
+    sentences
+}
+
+/// Thread-safe G2P via espeak-ng, with kokoros-level support for
+/// `<phoneme alphabet="ipa" ph="...">word</phoneme>` overrides.
+///
+/// `espeak_TextToPhonemes` itself does NOT parse SSML or `[[...]]` markup —
+/// those flags are only consumed by the full `espeak_Synth` pipeline. We
+/// implement overrides here by splitting the text at tag boundaries, running
+/// plain segments through espeak, and using the `ph` attribute verbatim for
+/// phoneme segments. Acquires `ESPEAK_MUTEX` per espeak call (espeak-ng has
+/// thread-unsafe global state — see espeak-ng/espeak-ng#495).
 fn safe_text_to_phonemes(
     text: &str,
     language: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let _guard = ESPEAK_MUTEX.lock().unwrap();
-    text_to_phonemes(text, language, None, true, false)
-        .map(|v| v.join(""))
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    let segments = split_phoneme_overrides(text);
+    debug!(
+        "safe_text_to_phonemes: input_len={} segments={}",
+        text.len(),
+        segments.len()
+    );
+    let mut out = String::new();
+    for segment in segments {
+        match segment {
+            PhonemeSegment::Text(t) => {
+                let _guard = ESPEAK_MUTEX.lock().unwrap();
+                let phs = text_to_phonemes(&t, language, None, true, false)
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
+                    .join("");
+                out.push_str(&phs);
+            }
+            PhonemeSegment::Override(ph) => out.push_str(&ph),
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Clone)]
@@ -142,10 +245,79 @@ pub struct TTSOpts<'a> {
     pub initial_silence: Option<usize>,
 }
 
+/// Pool of OrtKoko instances for concurrent inference.
+///
+/// Each slot is an independent ORT session. Callers block until a slot is
+/// available, then receive exclusive access for the duration of inference.
+/// Pool size is set at construction time via `KOKOROS_MODEL_POOL_SIZE`
+/// (default 2). All instances share the same CoreML disk cache so only the
+/// first cold-start pays the full compile cost.
+struct ModelPool {
+    slots: Mutex<VecDeque<ort_koko::OrtKoko>>,
+    available: Condvar,
+}
+
+impl ModelPool {
+    fn new(models: Vec<ort_koko::OrtKoko>) -> Self {
+        Self {
+            slots: Mutex::new(VecDeque::from(models)),
+            available: Condvar::new(),
+        }
+    }
+
+    /// Check out one model instance, blocking until one is free.
+    ///
+    /// Mutex poisoning here means a previous holder panicked while running
+    /// inference; we propagate the panic rather than try to limp along with
+    /// a model in unknown state.
+    fn acquire(&self) -> ModelGuard<'_> {
+        let mut queue = self.slots.lock().expect("model pool mutex poisoned");
+        loop {
+            if let Some(model) = queue.pop_front() {
+                return ModelGuard {
+                    pool: self,
+                    model: Some(model),
+                };
+            }
+            queue = self
+                .available
+                .wait(queue)
+                .expect("model pool mutex poisoned");
+        }
+    }
+}
+
+struct ModelGuard<'a> {
+    pool: &'a ModelPool,
+    model: Option<ort_koko::OrtKoko>,
+}
+
+impl<'a> std::ops::DerefMut for ModelGuard<'a> {
+    fn deref_mut(&mut self) -> &mut ort_koko::OrtKoko {
+        self.model.as_mut().unwrap()
+    }
+}
+
+impl<'a> std::ops::Deref for ModelGuard<'a> {
+    type Target = ort_koko::OrtKoko;
+    fn deref(&self) -> &Self::Target {
+        self.model.as_ref().unwrap()
+    }
+}
+
+impl<'a> Drop for ModelGuard<'a> {
+    fn drop(&mut self) {
+        if let Some(model) = self.model.take() {
+            self.pool.slots.lock().unwrap().push_back(model);
+            self.pool.available.notify_one();
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct TTSKoko {
     _model_path: String, // Stored for potential debugging, prefixed with _ to indicate intentionally unused
-    model: Arc<Mutex<ort_koko::OrtKoko>>,
+    model_pool: Arc<ModelPool>,
     styles: HashMap<String, Vec<[[f32; 256]; 1]>>,
     init_config: InitConfig,
 }
@@ -185,18 +357,26 @@ impl TTSKoko {
                 .expect("download voices data file failed.");
         }
 
-        let model = Arc::new(Mutex::new(
-            ort_koko::OrtKoko::new(model_path.to_string())
-                .expect("Failed to create Kokoro TTS model"),
-        ));
-        // TODO: if(not streaming) { model.print_info(); }
-        // model.print_info();
+        let pool_size = std::env::var("KOKOROS_MODEL_POOL_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(2)
+            .max(1);
+
+        info!("Loading {pool_size} Kokoros model instance(s)");
+        let mut models = Vec::with_capacity(pool_size);
+        for i in 0..pool_size {
+            let instance = ort_koko::OrtKoko::new(model_path.to_string())
+                .unwrap_or_else(|e| panic!("Failed to create Kokoro TTS model instance {i}: {e}"));
+            models.push(instance);
+        }
+        let model_pool = Arc::new(ModelPool::new(models));
 
         let styles = Self::load_voices(voices_path);
 
         TTSKoko {
             _model_path: model_path.to_string(),
-            model,
+            model_pool,
             styles,
             init_config: cfg,
         }
@@ -430,11 +610,11 @@ impl TTSKoko {
     fn split_text_into_chunks(&self, text: &str, max_tokens: usize) -> Vec<String> {
         let mut chunks = Vec::new();
 
-        // First split by sentences - using common sentence ending punctuation
-        let sentences: Vec<&str> = text
-            .split(['.', '?', '!', ';'])
-            .filter(|s| !s.trim().is_empty())
-            .collect();
+        // Split by sentence-ending punctuation, but never inside a <phoneme>
+        // tag — IPA values may contain `.` as syllable boundaries (e.g.
+        // /ˈbʌ.tən/), and a naive char split would shred the tag and feed the
+        // fragments to espeak as plain text.
+        let sentences = split_sentences_outside_phoneme_tags(text);
 
         let mut current_chunk = String::new();
 
@@ -508,7 +688,7 @@ impl TTSKoko {
         style_name: &str,
         speed: f32,
         initial_silence: Option<usize>,
-    ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
         // First, preprocess emphasis tags (replace with markers)
         let txt_with_markers = self.preprocess_emphasis_tags(txt);
 
@@ -563,7 +743,7 @@ impl TTSKoko {
             for chunk in chunks.iter() {
                 // Convert chunk to phonemes (using thread-safe wrapper)
                 let phonemes = safe_text_to_phonemes(chunk, lan)
-                    .map_err(|e| e as Box<dyn std::error::Error>)?;
+                    .map_err(|e| e as Box<dyn std::error::Error + Send + Sync>)?;
                 debug!("phonemes: {}", phonemes);
                 let tokens = tokenize(&phonemes);
 
@@ -583,9 +763,8 @@ impl TTSKoko {
                 let adjusted_speed = speed * speed_multiplier;
 
                 match self
-                    .model
-                    .lock()
-                    .unwrap()
+                    .model_pool
+                    .acquire()
                     .infer(tokens, styles.clone(), adjusted_speed)
                 {
                     Ok(chunk_audio) => {
@@ -642,7 +821,7 @@ impl TTSKoko {
             speed,
             initial_silence,
         }: TTSOpts,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let audio = self.tts_raw_audio(txt, lan, style_name, speed, initial_silence)?;
 
         // Save to file
@@ -682,7 +861,7 @@ impl TTSKoko {
         &self,
         style_name: &str,
         tokens_len: usize,
-    ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error + Send + Sync>> {
         if !style_name.contains("+") {
             if let Some(style) = self.styles.get(style_name) {
                 let styles = vec![style[tokens_len][0].to_vec()];
@@ -921,6 +1100,96 @@ mod tests {
             parse_emphasis_level("invalid"),
             EmphasisLevel::Moderate
         ));
+    }
+
+    #[test]
+    fn test_phoneme_override_regex_alphabet_first() {
+        let text = r#"She <phoneme alphabet="ipa" ph="lˈɪvz">lives</phoneme> here."#;
+        let caps: Vec<_> = PHONEME_OVERRIDE_REGEX.captures_iter(text).collect();
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0].get(1).unwrap().as_str(), "lˈɪvz");
+        assert!(caps[0].get(2).is_none());
+    }
+
+    #[test]
+    fn test_phoneme_override_regex_ph_first() {
+        // Reversed attribute order — must still match (group 2).
+        let text = r#"She <phoneme ph="lˈɪvz" alphabet="ipa">lives</phoneme> here."#;
+        let caps: Vec<_> = PHONEME_OVERRIDE_REGEX.captures_iter(text).collect();
+        assert_eq!(caps.len(), 1);
+        assert!(caps[0].get(1).is_none());
+        assert_eq!(caps[0].get(2).unwrap().as_str(), "lˈɪvz");
+    }
+
+    #[test]
+    fn test_phoneme_override_regex_non_ipa_alphabet_skipped() {
+        // alphabet="x-sampa" must NOT match — falls through to espeak.
+        let text = r#"<phoneme alphabet="x-sampa" ph="lIvz">lives</phoneme>"#;
+        let caps: Vec<_> = PHONEME_OVERRIDE_REGEX.captures_iter(text).collect();
+        assert!(caps.is_empty());
+    }
+
+    fn text(s: &str) -> PhonemeSegment {
+        PhonemeSegment::Text(s.to_string())
+    }
+    fn ovr(s: &str) -> PhonemeSegment {
+        PhonemeSegment::Override(s.to_string())
+    }
+
+    #[test]
+    fn test_split_phoneme_overrides_no_tag() {
+        assert_eq!(
+            split_phoneme_overrides("plain sentence with no tags."),
+            vec![text("plain sentence with no tags.")]
+        );
+    }
+
+    #[test]
+    fn test_split_phoneme_overrides_single_tag_in_middle() {
+        let input = r#"She <phoneme alphabet="ipa" ph="lˈɪvz">lives</phoneme> here."#;
+        assert_eq!(
+            split_phoneme_overrides(input),
+            vec![text("She "), ovr("lˈɪvz"), text(" here.")]
+        );
+    }
+
+    #[test]
+    fn test_split_phoneme_overrides_multiple_tags() {
+        let input = r#"<phoneme alphabet="ipa" ph="A">a</phoneme> and <phoneme alphabet="ipa" ph="B">b</phoneme>"#;
+        assert_eq!(
+            split_phoneme_overrides(input),
+            vec![ovr("A"), text(" and "), ovr("B")]
+        );
+    }
+
+    #[test]
+    fn test_split_phoneme_overrides_tag_at_boundaries() {
+        assert_eq!(
+            split_phoneme_overrides(r#"<phoneme alphabet="ipa" ph="X">x</phoneme> tail"#),
+            vec![ovr("X"), text(" tail")]
+        );
+        assert_eq!(
+            split_phoneme_overrides(r#"head <phoneme alphabet="ipa" ph="Y">y</phoneme>"#),
+            vec![text("head "), ovr("Y")]
+        );
+    }
+
+    #[test]
+    fn test_split_sentences_outside_phoneme_tags_protects_dot_in_ipa() {
+        // IPA "ˈbʌ.tən" contains a syllable-boundary dot. The naive char split
+        // would break the tag in two; this helper must treat the tag as atomic.
+        let text = r#"Press <phoneme alphabet="ipa" ph="ˈbʌ.tən">button</phoneme>. Then wait."#;
+        let sentences = split_sentences_outside_phoneme_tags(text);
+        assert_eq!(sentences.len(), 2);
+        // First sentence must contain the entire tag intact.
+        assert!(sentences[0].contains(r#"<phoneme alphabet="ipa" ph="ˈbʌ.tən">button</phoneme>"#));
+        assert_eq!(sentences[1], "Then wait");
+    }
+
+    #[test]
+    fn test_split_sentences_outside_phoneme_tags_no_tag() {
+        let sentences = split_sentences_outside_phoneme_tags("First. Second? Third!");
+        assert_eq!(sentences, vec!["First", "Second", "Third"]);
     }
 
     #[test]

@@ -134,7 +134,7 @@ struct Cli {
     mode: Mode,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialize logging - respects RUST_LOG environment variable
     env_logger::init();
 

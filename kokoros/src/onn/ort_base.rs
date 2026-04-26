@@ -1,6 +1,10 @@
-use log::{debug, info, warn};
 #[cfg(feature = "coreml")]
-use ort::execution_providers::coreml::CoreMLExecutionProvider;
+use log::warn;
+use log::{debug, info};
+#[cfg(feature = "coreml")]
+use ort::execution_providers::coreml::{
+    CoreMLComputeUnits, CoreMLExecutionProvider, CoreMLModelFormat, CoreMLSpecializationStrategy,
+};
 use ort::execution_providers::cpu::CPUExecutionProvider;
 #[cfg(feature = "cuda")]
 use ort::execution_providers::cuda::CUDAExecutionProvider;
@@ -38,6 +42,47 @@ fn is_cuda_available() -> bool {
     }
 
     false
+}
+
+/// Resolve the per-model CoreML cache directory.
+///
+/// Default root: `<OS cache dir>/kokoros/coreml/` (e.g. `~/Library/Caches/kokoros/coreml/` on macOS).
+/// Override or disable via `KOKOROS_COREML_CACHE_DIR` env var ("none"/"disable" → no cache).
+///
+/// The model-specific subdirectory is keyed by `<file-size>-<mtime-secs>` so that replacing the
+/// ONNX file with a new version automatically triggers a fresh CoreML compilation.
+#[cfg(feature = "coreml")]
+fn coreml_cache_dir(model_path: &str) -> Option<std::path::PathBuf> {
+    let root: Option<std::path::PathBuf> =
+        match std::env::var("KOKOROS_COREML_CACHE_DIR").ok().as_deref() {
+            Some("none") | Some("disable") | Some("") => return None,
+            Some(path) => Some(std::path::PathBuf::from(path)),
+            None => dirs::cache_dir().map(|d| d.join("kokoros").join("coreml")),
+        };
+
+    let root = root?;
+
+    let meta = std::fs::metadata(model_path).ok()?;
+    let size = meta.len();
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let key = format!("{}-{}", size, mtime);
+    let dir = root.join(key);
+
+    match std::fs::create_dir_all(&dir) {
+        Ok(()) => Some(dir),
+        Err(e) => {
+            warn!(
+                "CoreML cache dir {:?} could not be created ({}); continuing without cache",
+                dir, e
+            );
+            None
+        }
+    }
 }
 
 pub trait OrtBase {
@@ -80,13 +125,54 @@ pub trait OrtBase {
         }
 
         #[cfg(feature = "coreml")]
-        let _providers = [
-            CoreMLExecutionProvider::default().build(),
-            CPUExecutionProvider::default().build(),
-        ];
+        let _providers = {
+            let cache_dir = coreml_cache_dir(&model_path);
+            let mlprogram = std::env::var("KOKOROS_COREML_MLPROGRAM")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+
+            let profile = std::env::var("KOKOROS_COREML_PROFILE_COMPUTE_PLAN")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+
+            // KOKOROS_COREML_COMPUTE_UNITS: all (default) | gpu | ane
+            let compute_units = match std::env::var("KOKOROS_COREML_COMPUTE_UNITS")
+                .as_deref()
+                .unwrap_or("all")
+            {
+                "gpu" => Some(CoreMLComputeUnits::CPUAndGPU),
+                "ane" => Some(CoreMLComputeUnits::CPUAndNeuralEngine),
+                _ => None, // all compute units (CoreML default)
+            };
+
+            let fast_prediction = std::env::var("KOKOROS_COREML_FAST_PREDICTION")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+
+            let mut provider = CoreMLExecutionProvider::default();
+            if let Some(dir) = &cache_dir {
+                provider = provider.with_model_cache_dir(dir.display().to_string());
+                info!("CoreML model cache: {}", dir.display());
+            }
+            if mlprogram {
+                provider = provider.with_model_format(CoreMLModelFormat::MLProgram);
+                info!("CoreML model format: MLProgram");
+            }
+            if let Some(units) = compute_units {
+                provider = provider.with_compute_units(units);
+            }
+            if fast_prediction {
+                provider = provider
+                    .with_specialization_strategy(CoreMLSpecializationStrategy::FastPrediction);
+            }
+            if profile {
+                provider = provider.with_profile_compute_plan(true);
+            }
+            vec![provider.build(), CPUExecutionProvider::default().build()]
+        };
 
         #[cfg(not(feature = "coreml"))]
-        let _providers = [CPUExecutionProvider::default().build()];
+        let _providers = vec![CPUExecutionProvider::default().build()];
 
         match SessionBuilder::new() {
             Ok(builder) => {

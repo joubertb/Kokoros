@@ -156,9 +156,12 @@ async fn handle_tts(
         input.len()
     );
 
-    let raw_audio = tts
-        .tts_raw_audio(&input, "en-us", &voice, speed, initial_silence)
-        .map_err(SpeechError::Koko)?;
+    let raw_audio = tokio::task::spawn_blocking(move || {
+        tts.tts_raw_audio(&input, "en-us", &voice, speed, initial_silence)
+    })
+    .await
+    .map_err(|e| SpeechError::Koko(Box::new(e)))?
+    .map_err(|e| SpeechError::Koko(e))?;
 
     let sample_rate = TTSKokoInitConfig::default().sample_rate;
 
@@ -219,9 +222,12 @@ async fn handle_pcm(
         input.len()
     );
 
-    let raw_audio = tts
-        .tts_raw_audio(&input, "en-us", &voice, speed, initial_silence)
-        .map_err(SpeechError::Koko)?;
+    let raw_audio = tokio::task::spawn_blocking(move || {
+        tts.tts_raw_audio(&input, "en-us", &voice, speed, initial_silence)
+    })
+    .await
+    .map_err(|e| SpeechError::Koko(Box::new(e)))?
+    .map_err(|e| SpeechError::Koko(e))?;
 
     let sample_rate = TTSKokoInitConfig::default().sample_rate;
 
