@@ -1,4 +1,4 @@
-#[cfg(feature = "coreml")]
+#[cfg(any(feature = "coreml", feature = "cuda"))]
 use log::warn;
 use log::{debug, info};
 #[cfg(feature = "coreml")]
