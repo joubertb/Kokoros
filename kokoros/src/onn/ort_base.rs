@@ -1,6 +1,4 @@
-#[cfg(any(feature = "coreml", feature = "cuda"))]
-use log::warn;
-use log::{debug, info};
+use log::{debug, info, warn};
 #[cfg(feature = "coreml")]
 use ort::execution_providers::coreml::{
     CoreMLComputeUnits, CoreMLExecutionProvider, CoreMLModelFormat, CoreMLSpecializationStrategy,
@@ -85,6 +83,46 @@ fn coreml_cache_dir(model_path: &str) -> Option<std::path::PathBuf> {
     }
 }
 
+/// Parses a thread-count environment value. Unset, empty, zero and non-numeric
+/// values yield `None`, which leaves the ONNX Runtime default in place.
+fn parse_thread_count(value: Option<&str>) -> Option<usize> {
+    value?.trim().parse::<usize>().ok().filter(|n| *n > 0)
+}
+
+fn thread_count_from_env(name: &str) -> Option<usize> {
+    let value = std::env::var(name).ok();
+    let count = parse_thread_count(value.as_deref());
+    if count.is_none() {
+        if let Some(raw) = value.filter(|v| !v.trim().is_empty()) {
+            warn!("Ignoring invalid {} '{}', using ONNX Runtime default", name, raw);
+        }
+    }
+    count
+}
+
+/// Applies `ORT_INTRA_OP_NUM_THREADS` / `ORT_INTER_OP_NUM_THREADS` to a session.
+///
+/// With no explicit size ONNX Runtime creates one thread per host core and pins
+/// each to that core. Inside a container limited by cpuset the pool is oversized
+/// (and every `ModelPool` slot gets its own) and pinning to cores outside the set
+/// fails (pthread_setaffinity_np: Invalid argument). An explicit size disables
+/// the pinning.
+fn with_thread_counts(mut builder: SessionBuilder) -> Result<SessionBuilder, String> {
+    if let Some(threads) = thread_count_from_env("ORT_INTRA_OP_NUM_THREADS") {
+        info!("ONNX Runtime intra-op threads: {}", threads);
+        builder = builder
+            .with_intra_threads(threads)
+            .map_err(|e| format!("Failed to set intra-op threads: {}", e))?;
+    }
+    if let Some(threads) = thread_count_from_env("ORT_INTER_OP_NUM_THREADS") {
+        info!("ONNX Runtime inter-op threads: {}", threads);
+        builder = builder
+            .with_inter_threads(threads)
+            .map_err(|e| format!("Failed to set inter-op threads: {}", e))?;
+    }
+    Ok(builder)
+}
+
 pub trait OrtBase {
     fn load_model(&mut self, model_path: String) -> Result<(), String> {
         #[cfg(feature = "cuda")]
@@ -97,7 +135,7 @@ pub trait OrtBase {
                 ];
                 match SessionBuilder::new() {
                     Ok(builder) => {
-                        match builder
+                        match with_thread_counts(builder)?
                             .with_execution_providers(cuda_providers)
                             .map_err(|e| format!("Failed to build session: {}", e))?
                             .commit_from_file(&model_path)
@@ -176,7 +214,7 @@ pub trait OrtBase {
 
         match SessionBuilder::new() {
             Ok(builder) => {
-                let session = builder
+                let session = with_thread_counts(builder)?
                     .with_execution_providers(_providers)
                     .map_err(|e| format!("Failed to build session: {}", e))?
                     .commit_from_file(model_path)
@@ -218,4 +256,24 @@ pub trait OrtBase {
 
     fn set_sess(&mut self, sess: Session);
     fn sess(&self) -> Option<&Session>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_thread_count;
+
+    #[test]
+    fn parses_positive_counts() {
+        assert_eq!(parse_thread_count(Some("4")), Some(4));
+        assert_eq!(parse_thread_count(Some(" 2 ")), Some(2));
+    }
+
+    #[test]
+    fn rejects_unset_zero_and_invalid_values() {
+        assert_eq!(parse_thread_count(None), None);
+        assert_eq!(parse_thread_count(Some("")), None);
+        assert_eq!(parse_thread_count(Some("0")), None);
+        assert_eq!(parse_thread_count(Some("-1")), None);
+        assert_eq!(parse_thread_count(Some("four")), None);
+    }
 }
