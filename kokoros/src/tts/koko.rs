@@ -7,9 +7,10 @@ use ndarray::Array3;
 use ndarray_npy::NpzReader;
 use regex::Regex;
 use std::collections::{HashMap, VecDeque};
+use std::ffi::{CStr, CString, c_void};
 use std::fs::File;
 use std::path::Path;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use espeak_rs::text_to_phonemes;
 
@@ -218,17 +219,13 @@ fn safe_text_to_phonemes(
         text.len(),
         segments.len()
     );
-    // Only re-fit segment edges when an override splits the text; plain text
-    // keeps espeak's output exactly as before.
+    // Only re-fit segment edges when an override splits the text.
     let has_override = segments.len() > 1;
     let mut out = String::new();
     for segment in segments {
         match segment {
             PhonemeSegment::Text(t) => {
-                let _guard = ESPEAK_MUTEX.lock().unwrap();
-                let phs = text_to_phonemes(&t, language, None, true, false)
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
-                    .join("");
+                let phs = clause_phonemes(&t, language)?;
                 if has_override {
                     out.push_str(&fit_segment_phonemes(&t, &phs));
                 } else {
@@ -241,25 +238,16 @@ fn safe_text_to_phonemes(
     Ok(out)
 }
 
-/// Fit one plain segment's espeak phonemes back between its neighbouring
+/// Fit one plain segment's phonemes back between its neighbouring
 /// `<phoneme>` overrides.
 ///
 /// espeak drops the segment's edge whitespace, so without this an override
-/// fuses with the next word ("Pentagon and" → "pentagend"). And espeak-rs
-/// appends '.' after every call (it never reads the clause terminator, and
-/// CLAUSE_INTONATION_FULL_STOP is 0), which puts a sentence-final pause before
-/// each override. Restore one space per whitespace edge, and keep the
-/// trailing mark only when the original segment really ends with it.
+/// fuses with the next word ("Pentagon and" → "pentagend"). Restore one
+/// space per whitespace edge. `clause_phonemes` recovers marks that end a
+/// clause; a mark that opens the segment (", and" after an override) is
+/// restored here.
 fn fit_segment_phonemes(original: &str, phonemes: &str) -> String {
-    let mut core = phonemes.trim().to_string();
-    let last = original.trim_end().chars().last();
-    if core.ends_with('.') && !matches!(last, Some('.')) {
-        core.pop();
-        if let Some(mark @ (',' | '?' | '!')) = last {
-            core.push(mark);
-        }
-    }
-
+    let core = phonemes.trim();
     let is_edge = |c: &char| !c.is_alphanumeric();
     let lead: String = original.chars().take_while(is_edge).collect();
     let trail: String = original.chars().rev().take_while(is_edge).collect();
@@ -272,17 +260,140 @@ fn fit_segment_phonemes(original: &str, phonemes: &str) -> String {
     }
 
     let mut s = String::new();
-    if lead.contains(',') {
-        s.push(',');
+    let lead_mark = lead.chars().find(|c| CLAUSE_MARKS.contains(*c));
+    if let Some(m) = lead_mark.filter(|m| !core.starts_with(*m)) {
+        s.push(m);
     }
-    if lead.chars().any(char::is_whitespace) {
+    if lead.chars().any(char::is_whitespace) && !core.starts_with(|c| CLAUSE_MARKS.contains(c)) {
         s.push(' ');
     }
-    s.push_str(&core);
+    s.push_str(core);
     if trail.chars().any(char::is_whitespace) {
         s.push(' ');
     }
     s
+}
+
+lazy_static! {
+    // espeak language-switch markers such as "(en)" / "(fr)".
+    static ref LANG_SWITCH_REGEX: Regex = Regex::new(r"\([^)]*\)").unwrap();
+    // A clause's closing mark at the end of the text one espeak call consumed.
+    // Closing quotes/brackets may follow the mark ('"Hello," she said').
+    // espeak reads one character past the clause, so allow a single trailing
+    // non-space; requiring whitespace or end after the mark keeps "3,000"
+    // from reading as a comma.
+    static ref CLAUSE_MARK_REGEX: Regex =
+        Regex::new(r#"([,.;:?!])["'”’»)\]]*(?:\s+\S?|)$"#).unwrap();
+}
+
+/// Clause marks the voice model's vocabulary carries.
+const CLAUSE_MARKS: &str = ",.;:?!";
+
+/// espeak-ng initialization result, cached so a failure is returned on every
+/// call rather than only the first.
+static ESPEAK_INIT: OnceLock<Result<(), String>> = OnceLock::new();
+
+/// Convert one plain text segment to IPA, keeping each clause's punctuation.
+///
+/// espeak returns one clause per `espeak_TextToPhonemes` call. espeak-rs 0.1.9
+/// is meant to append the clause's punctuation but never reads the real
+/// terminator (it tests a constant 0, and CLAUSE_INTONATION_FULL_STOP is 0),
+/// so every comma became '.' with no space ("mˈɑːdəl.ðˈɛn"). The bundled
+/// espeak-ng predates espeak_TextToPhonemesWithTerminator, so recover the mark
+/// from the text each call consumed (see CLAUSE_MARK_REGEX).
+fn clause_phonemes(
+    text: &str,
+    language: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let _guard = ESPEAK_MUTEX.lock().unwrap();
+    // espeak-rs owns espeak-ng initialization (data-dir discovery); any call
+    // with a non-empty line runs it once.
+    ESPEAK_INIT
+        .get_or_init(|| {
+            text_to_phonemes("a", language, None, true, false)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .clone()?;
+
+    // espeak-rs split on lines and ended each with '.'; keep a line break as a
+    // clause end so an unpunctuated heading doesn't run into the next line.
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut out = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        let ph = line_phonemes(line, language)?;
+        if ph.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&ph);
+        let is_last = i + 1 == lines.len();
+        if !is_last && !ph.ends_with(|c| CLAUSE_MARKS.contains(c)) {
+            out.push('.');
+        }
+    }
+    Ok(out)
+}
+
+/// One line of `clause_phonemes`: the espeak clause loop. Caller holds
+/// ESPEAK_MUTEX and has initialized espeak.
+fn line_phonemes(
+    text: &str,
+    language: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let c_lang = CString::new(language)?;
+    let c_text = CString::new(text)?;
+    let bytes = c_text.as_bytes();
+    let start = c_text.as_ptr() as usize;
+    let mut out = String::new();
+    // SAFETY: c_text outlives the loop; espeak only reads it and advances
+    // `ptr` within it (or sets it to null at the end). Calls are serialized
+    // by ESPEAK_MUTEX because espeak-ng has global state.
+    unsafe {
+        if espeak_rs_sys::espeak_SetVoiceByName(c_lang.as_ptr())
+            != espeak_rs_sys::espeak_ERROR_EE_OK
+        {
+            return Err(format!("Failed to set eSpeak-ng voice to `{language}`").into());
+        }
+        let mut ptr: *const c_void = c_text.as_ptr() as *const c_void;
+        let mut consumed = 0usize;
+        while !ptr.is_null() {
+            let res = espeak_rs_sys::espeak_TextToPhonemes(
+                &mut ptr,
+                espeak_rs_sys::espeakCHARS_UTF8 as i32,
+                espeak_rs_sys::espeakINITIALIZE_PHONEME_IPA as i32,
+            );
+            let end = if ptr.is_null() {
+                bytes.len()
+            } else {
+                (ptr as usize - start).min(bytes.len())
+            };
+            let clause = String::from_utf8_lossy(&bytes[consumed..end]);
+            consumed = end;
+            let ph = if res.is_null() {
+                String::new()
+            } else {
+                CStr::from_ptr(res).to_string_lossy().into_owned()
+            };
+            let ph = LANG_SWITCH_REGEX.replace_all(ph.trim(), "");
+            let mark = CLAUSE_MARK_REGEX
+                .captures(&clause)
+                .and_then(|c| c[1].chars().next());
+            if ph.is_empty() && mark.is_none() {
+                continue;
+            }
+            if !out.is_empty() && !ph.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(&ph);
+            if let Some(m) = mark {
+                out.push(m);
+            }
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Clone)]
@@ -1227,30 +1338,109 @@ mod tests {
 
     #[test]
     fn test_fit_segment_phonemes_restores_boundary_spaces() {
-        // espeak drops edge whitespace and appends '.' to every call.
-        assert_eq!(fit_segment_phonemes("with the ", "wɪððə."), "wɪððə ");
-        assert_eq!(fit_segment_phonemes(" and the", "ænd ðə."), " ænd ðə");
+        // espeak drops a segment's edge whitespace.
+        assert_eq!(fit_segment_phonemes("with the ", "wɪððə"), "wɪððə ");
+        assert_eq!(fit_segment_phonemes(" and the", "ænd ðə"), " ænd ðə");
     }
 
     #[test]
-    fn test_fit_segment_phonemes_keeps_real_sentence_end() {
+    fn test_fit_segment_phonemes_keeps_clause_marks() {
+        // Marks now come from clause_phonemes; fit only adds edge spaces.
         assert_eq!(
             fit_segment_phonemes(" into Beam.", "ˌɪntʊ bˈiːm."),
             " ˌɪntʊ bˈiːm."
         );
-        assert_eq!(fit_segment_phonemes(" now?", "nˈaʊ."), " nˈaʊ?");
-    }
-
-    #[test]
-    fn test_fit_segment_phonemes_comma_edges() {
-        assert_eq!(fit_segment_phonemes("Mac, ", "mˈæk."), "mˈæk, ");
-        assert_eq!(fit_segment_phonemes(", and", "ænd."), ", ænd");
+        assert_eq!(fit_segment_phonemes("Mac, ", "mˈæk,"), "mˈæk, ");
+        assert_eq!(fit_segment_phonemes(", and", ", ænd"), ", ænd");
     }
 
     #[test]
     fn test_fit_segment_phonemes_whitespace_only_between_tags() {
         assert_eq!(fit_segment_phonemes(" ", ""), " ");
         assert_eq!(fit_segment_phonemes(")", ""), "");
+    }
+
+    #[test]
+    fn test_clause_phonemes_keeps_commas_and_word_gaps() {
+        let ph = clause_phonemes("a base model, then trained it.", "en-us").unwrap();
+        assert!(ph.contains("mˈɑːdəl, ðˈɛn"), "got: {ph}");
+        assert!(ph.ends_with('.'), "sentence end lost: {ph}");
+    }
+
+    #[test]
+    fn test_clause_phonemes_keeps_each_mark() {
+        let ph = clause_phonemes("speed, cost; privacy: run it now?", "en-us").unwrap();
+        assert!(
+            !ph.contains(".s") && !ph.contains(".k"),
+            "comma became stop: {ph}"
+        );
+        for mark in [", ", "; ", ": "] {
+            assert!(ph.contains(mark), "missing {mark:?}: {ph}");
+        }
+        assert!(ph.ends_with('?'), "question mark lost: {ph}");
+    }
+
+    #[test]
+    fn test_safe_text_to_phonemes_override_keeps_following_comma() {
+        let ph = safe_text_to_phonemes(
+            r#"a lot of <phoneme alphabet="ipa" ph="mˈɪniz">minis</phoneme>, and the rest"#,
+            "en-us",
+        )
+        .unwrap();
+        assert!(ph.contains("mˈɪniz, "), "got: {ph}");
+    }
+
+    #[test]
+    fn test_safe_text_to_phonemes_override_keeps_preceding_comma() {
+        let ph = safe_text_to_phonemes(
+            r#"the cloud, <phoneme alphabet="ipa" ph="mˈɪniz">minis</phoneme> too"#,
+            "en-us",
+        )
+        .unwrap();
+        assert!(ph.contains(", mˈɪniz "), "got: {ph}");
+    }
+
+    #[test]
+    fn test_clause_phonemes_mark_inside_closing_quote() {
+        let ph = clause_phonemes("\"Hello,\" she said.", "en-us").unwrap();
+        assert!(ph.contains(", "), "comma inside quotes lost: {ph}");
+        let ph = clause_phonemes("it works (mostly), then stops.", "en-us").unwrap();
+        assert!(ph.contains(", "), "comma after bracket lost: {ph}");
+    }
+
+    #[test]
+    fn test_clause_phonemes_line_break_ends_clause() {
+        let ph = clause_phonemes("Heading\nBody text.", "en-us").unwrap();
+        let heading_end = ph.find(' ').unwrap();
+        assert_eq!(
+            &ph[heading_end - 1..heading_end],
+            ".",
+            "no pause after heading: {ph}"
+        );
+        assert_eq!(ph.matches('.').count(), 2, "got: {ph}");
+    }
+
+    #[test]
+    fn test_clause_phonemes_number_comma_is_not_a_clause_mark() {
+        let ph = clause_phonemes("it costs 3,000 dollars", "en-us").unwrap();
+        assert!(!ph.contains(','), "got: {ph}");
+    }
+
+    #[test]
+    fn test_clause_phonemes_sentences_are_space_separated() {
+        let ph = clause_phonemes("First one. Second one.", "en-us").unwrap();
+        assert!(ph.contains(". "), "no gap after full stop: {ph}");
+        assert_eq!(ph.matches('.').count(), 2, "got: {ph}");
+    }
+
+    #[test]
+    fn test_clause_phonemes_no_trailing_mark_without_punctuation() {
+        let ph = clause_phonemes("with the ", "en-us").unwrap();
+        assert_eq!(
+            ph,
+            ph.trim_end_matches(|c: char| ",.;:?!".contains(c)),
+            "got: {ph}"
+        );
     }
 
     #[test]

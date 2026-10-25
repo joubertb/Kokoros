@@ -1067,6 +1067,7 @@ dependencies = [
  "dirs",
  "env_logger",
  "espeak-rs",
+ "espeak-rs-sys",
  "hound",
  "indicatif",
  "lazy_static",
