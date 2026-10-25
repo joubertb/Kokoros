@@ -218,6 +218,9 @@ fn safe_text_to_phonemes(
         text.len(),
         segments.len()
     );
+    // Only re-fit segment edges when an override splits the text; plain text
+    // keeps espeak's output exactly as before.
+    let has_override = segments.len() > 1;
     let mut out = String::new();
     for segment in segments {
         match segment {
@@ -226,12 +229,60 @@ fn safe_text_to_phonemes(
                 let phs = text_to_phonemes(&t, language, None, true, false)
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
                     .join("");
-                out.push_str(&phs);
+                if has_override {
+                    out.push_str(&fit_segment_phonemes(&t, &phs));
+                } else {
+                    out.push_str(&phs);
+                }
             }
             PhonemeSegment::Override(ph) => out.push_str(&ph),
         }
     }
     Ok(out)
+}
+
+/// Fit one plain segment's espeak phonemes back between its neighbouring
+/// `<phoneme>` overrides.
+///
+/// espeak drops the segment's edge whitespace, so without this an override
+/// fuses with the next word ("Pentagon and" → "pentagend"). And espeak-rs
+/// appends '.' after every call (it never reads the clause terminator, and
+/// CLAUSE_INTONATION_FULL_STOP is 0), which puts a sentence-final pause before
+/// each override. Restore one space per whitespace edge, and keep the
+/// trailing mark only when the original segment really ends with it.
+fn fit_segment_phonemes(original: &str, phonemes: &str) -> String {
+    let mut core = phonemes.trim().to_string();
+    let last = original.trim_end().chars().last();
+    if core.ends_with('.') && !matches!(last, Some('.')) {
+        core.pop();
+        if let Some(mark @ (',' | '?' | '!')) = last {
+            core.push(mark);
+        }
+    }
+
+    let is_edge = |c: &char| !c.is_alphanumeric();
+    let lead: String = original.chars().take_while(is_edge).collect();
+    let trail: String = original.chars().rev().take_while(is_edge).collect();
+    if core.is_empty() {
+        return if original.chars().any(char::is_whitespace) {
+            " ".to_string()
+        } else {
+            String::new()
+        };
+    }
+
+    let mut s = String::new();
+    if lead.contains(',') {
+        s.push(',');
+    }
+    if lead.chars().any(char::is_whitespace) {
+        s.push(' ');
+    }
+    s.push_str(&core);
+    if trail.chars().any(char::is_whitespace) {
+        s.push(' ');
+    }
+    s
 }
 
 #[derive(Debug, Clone)]
@@ -1172,6 +1223,45 @@ mod tests {
             split_phoneme_overrides(r#"head <phoneme alphabet="ipa" ph="Y">y</phoneme>"#),
             vec![text("head "), ovr("Y")]
         );
+    }
+
+    #[test]
+    fn test_fit_segment_phonemes_restores_boundary_spaces() {
+        // espeak drops edge whitespace and appends '.' to every call.
+        assert_eq!(fit_segment_phonemes("with the ", "wɪððə."), "wɪððə ");
+        assert_eq!(fit_segment_phonemes(" and the", "ænd ðə."), " ænd ðə");
+    }
+
+    #[test]
+    fn test_fit_segment_phonemes_keeps_real_sentence_end() {
+        assert_eq!(
+            fit_segment_phonemes(" into Beam.", "ˌɪntʊ bˈiːm."),
+            " ˌɪntʊ bˈiːm."
+        );
+        assert_eq!(fit_segment_phonemes(" now?", "nˈaʊ."), " nˈaʊ?");
+    }
+
+    #[test]
+    fn test_fit_segment_phonemes_comma_edges() {
+        assert_eq!(fit_segment_phonemes("Mac, ", "mˈæk."), "mˈæk, ");
+        assert_eq!(fit_segment_phonemes(", and", "ænd."), ", ænd");
+    }
+
+    #[test]
+    fn test_fit_segment_phonemes_whitespace_only_between_tags() {
+        assert_eq!(fit_segment_phonemes(" ", ""), " ");
+        assert_eq!(fit_segment_phonemes(")", ""), "");
+    }
+
+    #[test]
+    fn test_safe_text_to_phonemes_override_keeps_word_boundaries() {
+        let ph = safe_text_to_phonemes(
+            r#"with the <phoneme alphabet="ipa" ph="pˈɛntəɡˌɑːn">Pentagon</phoneme> and the"#,
+            "en",
+        )
+        .unwrap();
+        assert!(ph.contains(" pˈɛntəɡˌɑːn "), "got: {ph}");
+        assert!(!ph.contains("ðə."), "stray full stop before override: {ph}");
     }
 
     #[test]
