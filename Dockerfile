@@ -15,10 +15,13 @@ ARG BASE_RUNTIME=nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 FROM ${BASE_BUILD} AS builderrs
 
 ARG ONNXRUNTIME_VERSION=1.22.0
+# SHA-256 of the Microsoft.ML.OnnxRuntime.Gpu.Linux NuGet package for
+# ONNXRUNTIME_VERSION; update both together.
+ARG ONNXRUNTIME_GPU_SHA256=d3dabd8235b7a04a67838a3b93437420f1a709528a8d8611e08bedbb08206d1d
 
 # Install build dependencies.
 RUN apt-get update -qq && apt-get install -qq -y \
-    wget pkg-config libssl-dev clang git cmake libopus-dev ffmpeg curl && \
+    wget pkg-config libssl-dev clang git cmake libopus-dev ffmpeg curl unzip && \
     if ! command -v rustup >/dev/null 2>&1; then \
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.88.0; \
     fi
@@ -40,11 +43,15 @@ RUN cargo build --release --features cuda,kokoros/ort-dynamic
 RUN mkdir -p /app/espeak-ng-data && \
     cp -r /app/target/release/build/espeak-rs-sys-*/out/share/espeak-ng-data/* /app/espeak-ng-data/
 
-# Download GPU-enabled ONNX Runtime (includes CUDA/TensorRT EPs + CPU fallback)
+# Download GPU-enabled ONNX Runtime (includes CUDA/TensorRT EPs + CPU fallback).
+# From NuGet: github.com/microsoft/onnxruntime releases went 404 (2026-11-18).
 RUN mkdir -p /app/onnx_libs && \
     echo "Downloading ONNX Runtime GPU ${ONNXRUNTIME_VERSION}..." && \
-    curl -L https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-gpu-${ONNXRUNTIME_VERSION}.tgz | \
-    tar xzf - -C /app/onnx_libs --strip-components=2 --wildcards "*/lib/libonnxruntime*.so*" && \
+    curl -fsSL -o /tmp/ort-gpu.nupkg \
+        https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.gpu.linux/${ONNXRUNTIME_VERSION}/microsoft.ml.onnxruntime.gpu.linux.${ONNXRUNTIME_VERSION}.nupkg && \
+    echo "${ONNXRUNTIME_GPU_SHA256}  /tmp/ort-gpu.nupkg" | sha256sum -c - && \
+    unzip -j /tmp/ort-gpu.nupkg 'runtimes/linux-x64/native/*.so' -d /app/onnx_libs && \
+    rm /tmp/ort-gpu.nupkg && \
     echo "ONNX Runtime libraries:" && ls -la /app/onnx_libs/
 
 # ============================================================
