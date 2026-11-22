@@ -73,6 +73,10 @@ COPY --from=builderrs /app/data ./data
 COPY --from=builderrs /app/checkpoints ./checkpoints
 # GPU-enabled ONNX Runtime libraries
 COPY --from=builderrs /app/onnx_libs/ /usr/local/lib/
+# ort dlopens "libonnxruntime.so" by name, but /usr/local/lib is not on the
+# loader search path and ldconfig only caches the soname libonnxruntime.so.1.
+# Point ort at the library explicitly.
+ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
 
 # Point espeak-rs to the directory *containing* espeak-ng-data/
 ENV PIPER_ESPEAKNG_DATA_DIRECTORY=/app
